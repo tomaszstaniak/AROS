@@ -24,6 +24,7 @@ POSIXCTESTFILES := \
         open \
         opendir \
         pipe \
+        pipe_nonblock \
         statfs \
         strptime \
         strtok_r \
