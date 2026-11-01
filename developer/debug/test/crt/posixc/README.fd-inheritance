@@ -1,0 +1,19 @@
+The fd.library 51 / posixc inherited-descriptor regressions are finite probes.
+Run with an external deadline when checking a broken runtime.
+
+Build test-crt-posixc-general plus test-crt-posixc-vfork-fd-thread,
+test-crt-posixc-fd-copy-close and test-crt-posixc-close-pipe-progress.
+
+Run fd_reservation; expected return 0, or 77 when fd.library 51 is unavailable.
+For each of nofork, vfork-exit, vfork-fd, exec, cloexec run:
+    vfork_fd MODE FULL-PATH-TO-vfork_fd
+    vfork_fd_thread MODE FULL-PATH-TO-vfork_fd_thread
+Expected return 0. vfork-fd requires the actual X byte, EOF and a waited child;
+a surviving parent descriptor alone does not pass this test.
+
+fd_copy_close races table snapshots with sibling open/close/closedir and checks
+byte transfer plus EOF. close_pipe_progress checks that closing a duplicate
+reader does not lock the table behind blocking pipe IO; a delayed direct-DOS
+write releases the reader even on the broken lock implementation, bounding it.
+Both programs must return 0. These checks do not qualify forced termination,
+process-tree cancellation or general concurrent IO versus close of the same fd.
