@@ -297,16 +297,22 @@ int __getfdslot(int wanted_fd)
         struct Library *FDBase = PosixCBase->PosixCFDBase;
         /* A vfork child inherits the parent's descriptor table (__copy_fdarray);
            those fd numbers are already reserved system-wide by the parent as
-           FD_OWNER_POSIXC and are shared, not re-created.  Re-reserving them
-           would fail and abort the child's posixc OpenLib (seen as a spurious
-           ENOMEM from fork()).  Only reserve numbers not already owned by us. */
-        if (FD_GetOwner(wanted_fd) != FD_OWNER_POSIXC) {
+           FD_OWNER_POSIXC. Each independent table retains one reservation;
+           pthreads borrowing the same table do not acquire another reference. */
+        if (FD_GetOwner(wanted_fd) == FD_OWNER_POSIXC) {
+            /* Independent tables may inherit a descriptor number. Retain its
+               reservation so closing either copy cannot invalidate the other.
+               Older fd.library versions cannot represent this ownership. */
+            if (FDBase->lib_Version < 51)
+                error = ENOSYS;
+            else
+                error = FD_Retain(wanted_fd, FD_OWNER_POSIXC);
+        } else
             error = FD_Reserve(wanted_fd, FD_OWNER_POSIXC, NULL);
-            if (error) {
-                FD_UNLOCK(PosixCBase);
-                __set_errno(PosixCBase, error);
-                return -1;
-            }
+        if (error) {
+            FD_UNLOCK(PosixCBase);
+            __set_errno(PosixCBase, error);
+            return -1;
         }
     }
 
@@ -715,8 +721,15 @@ static int __copy_fdarray(fdesc **__src_fd_array, int fd_slots)
             if(__getfdslot(i) != i)
                 return 0;
 
-            if((FD_ARRAY(PosixCBase)[i] = __alloc_fdesc()) == NULL)
+            if((FD_ARRAY(PosixCBase)[i] = __alloc_fdesc()) == NULL) {
+                /* __getfdslot already retained this number, but there is no
+                   table entry for __exit_fd to release after setup fails. */
+                if (i > STDERR_FILENO && PosixCBase->PosixCFDBase) {
+                    struct Library *FDBase = PosixCBase->PosixCFDBase;
+                    FD_Free(i, FD_OWNER_POSIXC);
+                }
                 return 0;
+            }
 
             FD_ARRAY(PosixCBase)[i]->fdflags = __src_fd_array[i]->fdflags;
             FD_ARRAY(PosixCBase)[i]->fcb = __src_fd_array[i]->fcb;
@@ -780,9 +793,14 @@ int __init_fd(struct PosixCIntBase *PosixCBase)
     if (pPosixCBase && (pPosixCBase->flags & (VFORK_PARENT | EXEC_PARENT)))
     {
         /* VFORK_PARENT use case - child manipulates file descriptors prior to calling exec* */
-        int res = __copy_fdarray(pPosixCBase->fd_array, pPosixCBase->fd_slots);
+        int res;
+        /* A pthread base borrows its Process' table. Its own fd_array is
+           empty, so copy from the resolved owner and guard concurrent growth. */
+        FD_LOCK(pPosixCBase);
+        res = __copy_fdarray(FD_ARRAY(pPosixCBase), FD_SLOTS(pPosixCBase));
+        FD_UNLOCK(pPosixCBase);
 
-        if (pPosixCBase->flags & EXEC_PARENT)
+        if (res && (pPosixCBase->flags & EXEC_PARENT))
             /* EXEC_PARENT called through RunCommand which injected parameters to Input() */
             FD_ARRAY(PosixCBase)[STDIN_FILENO]->fcb->privflags |= _FCB_FLUSHONREAD;
 
