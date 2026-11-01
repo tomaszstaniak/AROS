@@ -26,7 +26,12 @@ int main(void) {
  close(p[1]);if(read(alias,b,sizeof(b))!=0)return 17;
  if(fcntl(alias,F_SETFL,fcntl(alias,F_GETFL)&~O_NONBLOCK) || (fcntl(p[0],F_GETFL)&O_NONBLOCK))return 18;
  close(alias);close(p[0]);
- DIR *dir=opendir(".");if(!dir)return 21;
+#ifdef __AROS__
+ DIR *dir=opendir("RAM:");
+#else
+ DIR *dir=opendir(".");
+#endif
+ if(!dir)return 21;
  int fd=dirfd(dir),flags=fcntl(fd,F_GETFL);
  if(flags<0||fcntl(fd,F_SETFL,flags|O_NONBLOCK))return 22;
  closedir(dir);printf("PIPE_NONBLOCK_PASS capacity=%d empty/partial/full/progress/dup/EOF/toggle\n",total);return 0;
