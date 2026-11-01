@@ -76,6 +76,21 @@ extern APTR TaskResBase;
    __posixc_publish_stdbases() knows the opener is a worker. */
 static LONG __posixc_threadbase_slot;
 static LONG __posixc_vfork_parent_slot;
+#define POSIXC_THREAD_OPENING ((IPTR)1)
+
+/* Absolute wrappers pass the creator's base even on a pthread. Keep calls
+   from that program on the worker's own CRT context. An explicitly different
+   program/library base (e.g. a nested RunCommand) must retain its context. */
+APTR __posixc_resolve_call_base(APTR incoming)
+{
+    struct PosixCIntBase *worker = __posixc_threadbase_slot > 0
+        ? (struct PosixCIntBase *)GetTaskStorageSlot(__posixc_threadbase_slot)
+        : NULL;
+    if (incoming && worker && (IPTR)worker != POSIXC_THREAD_OPENING &&
+        incoming == worker->worker_call_base)
+        return worker;
+    return incoming;
+}
 
 /* Absolute-linked callers and the worker's pertaskbase need not be the same
    base. The launcher supplies the actual spawning context during OpenLib. */
@@ -94,7 +109,6 @@ struct PosixCIntBase *__posixc_parent_base(struct PosixCIntBase *base)
     return parent ? parent : (struct PosixCIntBase *)__GM_GetBaseParent(base);
 }
 
-#define POSIXC_THREAD_OPENING ((IPTR)1)
 
 static void posixc_thread_enter(void)
 {

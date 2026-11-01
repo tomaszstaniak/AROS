@@ -831,6 +831,7 @@ int __init_fd(struct PosixCIntBase *PosixCBase)
          * independent table path below.
          */
         PosixCBase->fd_owner = __fd_owner(pPosixCBase);
+        PosixCBase->worker_call_base = PosixCBase->fd_owner;
         return TRUE;
     }
 

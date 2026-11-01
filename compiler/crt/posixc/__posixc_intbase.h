@@ -75,6 +75,9 @@ struct PosixCIntBase
        for descriptor lookups; it is self for an ordinary Process/CLI child.
        Resolved through __fd_owner() / FD_ARRAY() / FD_SLOTS() / FD_POOL(). */
     struct PosixCIntBase *fd_owner;
+    /* Absolute-linked program calls on a pthread use that worker's context,
+       rather than mutating the creator context during a pretend-child window. */
+    struct PosixCIntBase *worker_call_base;
     int fd_slots;
     struct _fdesc **fd_array;
     /* Serialises fd_array/fd_slots access. The descriptor table is shared
@@ -139,6 +142,9 @@ struct PosixCIntBase
    execution of child code, even though that it's actually executed by parent
    process until execve() is called. */
 #define PRETEND_CHILD 0x00000004
+
+APTR __posixc_resolve_call_base(APTR base);
+#define GM_RESOLVE_CALL_BASE(base) __posixc_resolve_call_base(base)
 
 BOOL __posixc_set_vfork_parent(struct PosixCIntBase *parent);
 struct PosixCIntBase *__posixc_parent_base(struct PosixCIntBase *base);
