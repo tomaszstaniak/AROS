@@ -211,7 +211,7 @@
             struct FileHandle *fh = BADDR(desc->fcb->handle);
             BOOL pipe_mode = fh && fh->fh_Type &&
                 DoPkt(fh->fh_Type, ACTION_PIPE_SET_NONBLOCK, fh->fh_Arg1,
-                      (arg & O_NONBLOCK) != 0, 0, 0, 0) == DOSTRUE;
+                      (arg & O_NONBLOCK) != 0, 0, 0, 0) == 1;
             if (pipe_mode || ChangeMode(CHANGE_FH, desc->fcb->handle, oldmode | __oflags2amode(arg)) == DOSTRUE)
             {
                 desc->fcb->flags &= ~(O_NONBLOCK|O_APPEND|O_ASYNC);

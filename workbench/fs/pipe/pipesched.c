@@ -186,7 +186,7 @@ void PipeSetNonblock (struct DosPacket *pkt)
         pkt->dp_Res2= ERROR_ACTION_NOT_KNOWN;
       else
         { key->nonblock= pkt->dp_Arg2 != 0;
-          pkt->dp_Res1= DOSTRUE;
+          pkt->dp_Res1= 1; /* PSNB protocol success, not DOS boolean -1 */
           pkt->dp_Res2= 0;
         }
     }

@@ -5,7 +5,7 @@
  * Pipe nonblocking protocol adapted for POSIXC and both IO directions.
  * SPDX-License-Identifier: APL-1.1
  * Compatible with pomaros/aros-core 89db046157d415e98c05ca18316ca7ae63b07023.
- * DoPkt(handler, action, fh_Arg1, enable, 0, 0, 0) returns DOSTRUE on success.
+ * DoPkt(handler, action, fh_Arg1, enable, 0, 0, 0) returns 1 on success (0 on failure).
  * An older handler returns ERROR_ACTION_NOT_KNOWN. Nonblocking reads/writes
  * return available bytes immediately, zero for read EOF, or -1/PWOB when
  * no progress is possible. Existing blocking handles retain their behavior.

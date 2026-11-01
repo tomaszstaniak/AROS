@@ -19,7 +19,7 @@ int main(void) {
  /* Leave a nonblocking key in the allocator's free list before conversion. */
  seed=Open((CONST_STRPTR)name,MODE_OLDFILE);rc=3;if(!seed)goto out;
  struct FileHandle *h=BADDR(seed);
- rc=77;if(!DoPkt(h->fh_Type,ACTION_PIPE_SET_NONBLOCK,h->fh_Arg1,1,0,0,0))goto out;
+ rc=77;if(DoPkt(h->fh_Type,ACTION_PIPE_SET_NONBLOCK,h->fh_Arg1,1,0,0,0)!=1)goto out;
  Close(seed);seed=0;
  lock=Lock((CONST_STRPTR)name,SHARED_LOCK);rc=4;if(!lock)goto out;
  reader=OpenFromLock(lock);rc=5;if(!reader)goto out;lock=0;
