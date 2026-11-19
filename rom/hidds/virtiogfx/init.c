@@ -11,6 +11,8 @@
 
 #include <exec/types.h>
 #include <exec/lists.h>
+#include <exec/tasks.h>
+#include <dos/dos.h>
 #include <graphics/driver.h>
 #include <graphics/gfxbase.h>
 #include <hidd/gfx.h>
@@ -89,11 +91,72 @@ AROS_UFH3(static IPTR, FindGPU,
     return 0;
     AROS_USERFUNC_EXIT
 }
+/*
+ * Screen updates are collected into one rectangle and sent by a task of the
+ * driver. A drawing call therefore never waits for the device, and while one
+ * update is on its way the following ones merge into the next.
+ */
+#define PRESENT_SIGNAL SIGBREAKF_CTRL_F
+
+static struct Task *presenter;
+static BOOL present_dirty;
+static ULONG present_x1, present_y1, present_x2, present_y2;
+
+static void PresentTask(void)
+{
+    for (;;)
+    {
+        Wait(PRESENT_SIGNAL);
+
+        for (;;)
+        {
+            ULONG x1, y1, x2, y2;
+
+            Forbid();
+            if (!present_dirty)
+            {
+                Permit();
+                break;
+            }
+            x1 = present_x1; y1 = present_y1;
+            x2 = present_x2; y2 = present_y2;
+            present_dirty = FALSE;
+            Permit();
+
+            /* The transport keeps its own repaint flag when this fails. */
+            VirtioGPUPresent(gpu, x1, y1, x2 - x1, y2 - y1);
+        }
+    }
+}
+
 static void Present(APTR context, ULONG x, ULONG y, ULONG w, ULONG h)
 {
-    /* The transport reports the transition once and retains pending DMA until
-     * it can reap a late completion. Repeated draws must not flood the log. */
-    VirtioGPUPresent(context, x, y, w, h);
+    if (!w || !h)
+        return;
+
+    if (!presenter)
+    {
+        VirtioGPUPresent(context, x, y, w, h);
+        return;
+    }
+
+    Forbid();
+    if (present_dirty)
+    {
+        if (x < present_x1) present_x1 = x;
+        if (y < present_y1) present_y1 = y;
+        if (x + w > present_x2) present_x2 = x + w;
+        if (y + h > present_y2) present_y2 = y + h;
+    }
+    else
+    {
+        present_x1 = x; present_y1 = y;
+        present_x2 = x + w; present_y2 = y + h;
+        present_dirty = TRUE;
+    }
+    Permit();
+
+    Signal(presenter, PRESENT_SIGNAL);
 }
 BOOL initEFIFBGfxHW(struct HWData *data)
 {
@@ -159,6 +222,12 @@ static int EFIFBGfx_Init(LIBBASETYPEPTR LIBBASE)
                     LIBBASE->library.lib_OpenCnt = 1;
                     res = TRUE;
                     bug("[VM] virtio graphics driver registered\n");
+                    presenter = NewCreateTask(TASKTAG_PC, (IPTR)PresentTask,
+                                              TASKTAG_NAME, (IPTR)"virtiogfx present",
+                                              TASKTAG_PRI, 5,
+                                              TAG_DONE);
+                    if (!presenter)
+                        bug("[VirtioGfx] no present task; updates stay synchronous\n");
                 }
             }
         }
