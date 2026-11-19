@@ -14,6 +14,8 @@
 
 #include "gallium_intern.h"
 
+extern CONST_STRPTR softpipe_str;
+
 #undef HiddGalliumAttrBase
 #define HiddGalliumAttrBase GB(GalliumBase)->galliumAttrBase
 
@@ -140,6 +142,7 @@ static OOP_Object *GalliumOnVulkan(struct Library *GalliumBase, OOP_Object *vk,
     {
         { aHidd_Gallium_InterfaceVersion,       0 },
         { aHidd_Gallium_CoreAPI,                0 },
+        { aHidd_Gallium_ScreenFactory,          0 },
         { TAG_DONE,                             0 }
     };
     OOP_Object                                  *_driver = NULL;
@@ -149,6 +152,7 @@ static OOP_Object *GalliumOnVulkan(struct Library *GalliumBase, OOP_Object *vk,
 
     galliumTags[0].ti_Data = GetTagData(CPS_GalliumInterfaceVersion, -1, tags);
     galliumTags[1].ti_Data = GetTagData(CPS_GalliumCoreAPI, 0, tags);
+    galliumTags[2].ti_Data = GetTagData(CPS_PipeScreenFactory, 0, tags);
     friendbm = (struct BitMap *)GetTagData(CPS_PipeFriendBitMap, 0, tags);
     driver = (OOP_Object **)GetTagData(CPS_PipeScreenDriver, (IPTR)&_driver, tags);
 
@@ -211,6 +215,19 @@ static OOP_Object *GalliumOnVulkan(struct Library *GalliumBase, OOP_Object *vk,
 
             D(bug("[Gallium] %s: '%s' @ 0x%p\n", __PRETTY_FUNCTION__, tmpname, *driver));
         }
+    }
+
+    /* A hardware driver named by ENV:SYS/Gallium.default refuses when its
+     * device cannot run (no GPU, no firmware): GL then renders in software
+     * rather than not at all. */
+    if (!*driver && GB(GalliumBase)->fallback != softpipe_str)
+    {
+        if (!GB(GalliumBase)->softpipemodule)
+            GB(GalliumBase)->softpipemodule = OpenLibrary("softpipe.hidd", 9);
+        if (GB(GalliumBase)->softpipemodule)
+            *driver = OOP_NewObject(NULL, "hidd.gallium.softpipe", galliumTags);
+        D(bug("[Gallium] %s: '%s' unavailable, softpipe @ 0x%p\n", __PRETTY_FUNCTION__,
+            GB(GalliumBase)->fallback, *driver));
     }
 
     return *driver;

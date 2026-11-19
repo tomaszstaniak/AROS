@@ -22,7 +22,8 @@ LIB_GALLIUM_SOURCES = \
             createpipescreen \
             destroypipescreen \
             bltpiperesourcerastport \
-            scanoutframebuffer
+            scanoutframebuffer \
+            releasepiperastport
 
 ##MM- core-linklibs : linklibs-gallium
 

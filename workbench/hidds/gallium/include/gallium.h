@@ -45,6 +45,7 @@ enum
     moHidd_Gallium_DisplayResource,
     moHidd_Gallium_DisplayResourceRP,
     moHidd_Gallium_ResourceFromBitMap,
+    moHidd_Gallium_ReleaseRastPort,
 
     NUM_GALLIUM_METHODS
 };
@@ -59,11 +60,15 @@ enum
                                        their memory directly); FALSE when it can present tiled ones.
                                        A driver that does not answer is taken to need them. */
 
+    aoHidd_Gallium_ScreenFactory,
+    aoHidd_Gallium_Transport,
     num_Hidd_Gallium_Attrs
 };
 
 #define aHidd_Gallium_InterfaceVersion  (HiddGalliumAttrBase + aoHidd_Gallium_InterfaceVersion)
 #define aHidd_Gallium_CoreAPI  (HiddGalliumAttrBase + aoHidd_Gallium_CoreAPI)
+#define aHidd_Gallium_ScreenFactory (HiddGalliumAttrBase + aoHidd_Gallium_ScreenFactory)
+#define aHidd_Gallium_Transport (HiddGalliumAttrBase + aoHidd_Gallium_Transport)
 #define aHidd_Gallium_VulkanObject  (HiddGalliumAttrBase + aoHidd_Gallium_VulkanObject)
 #define aHidd_Gallium_LinearDisplay  (HiddGalliumAttrBase + aoHidd_Gallium_LinearDisplay)
 #define aHidd_Gallium_WinSys  (HiddGalliumAttrBase + aoHidd_Gallium_WinSys)
@@ -130,6 +135,14 @@ struct pHidd_Gallium_ResourceFromBitMap
     STACKED OOP_Object              *bitmap;   /* scan-out bitmap object */
     STACKED ULONG                   buffer;    /* 0 .. aHidd_BitMap_Buffers-1 */
     STACKED APTR                    screen;    /* struct pipe_screen * of this pipe */
+};
+
+/* The rastport (a window's) no longer receives frames: a driver that shows
+ * its frames on a plane of their own takes that plane down. */
+struct pHidd_Gallium_ReleaseRastPort
+{
+    STACKED OOP_MethodID            mID;
+    STACKED struct RastPort         *rastport;
 };
 
 #endif
