@@ -10,6 +10,12 @@
 
     Lock order: GalliumBase->sfbLock -> fb->lock -> tracker lock -> layer
     lock. The surface hook runs in the damaging task and only Attempts.
+
+    A recompute the hook has to defer (the window's own layer operation is
+    still running, a lock is taken, or the rate limit) is done by a helper
+    process as soon as the layer is free: a client that does not swap while
+    its window is dragged would otherwise leave the surface where the window
+    was.
 */
 
 #include <aros/debug.h>
@@ -24,7 +30,10 @@
 #include <graphics/clip.h>
 #include <graphics/layers.h>
 #include <intuition/intuition.h>
+#include <dos/dos.h>
+#include <dos/dostags.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/utility.h>
 #include <proto/graphics.h>
 #include <proto/oop.h>
@@ -54,6 +63,29 @@ static BOOL sfb_MapFormat(ULONG pipeformat, HIDDT_StdPixFmt *stdpf)
 }
 
 /*
+ * The framebuffer's rectangle, kept inside the window's borders: after the
+ * window has shrunk, the framebuffer still has its old size until the
+ * client makes a new one, and would otherwise cover the right and bottom
+ * border.
+ */
+static void sfb_Inner(struct GalliumScanoutFB *fb, struct Rectangle *inner)
+{
+    struct Window *w = fb->window;
+
+    *inner = fb->inner;
+    if (w)
+    {
+        LONG maxx = (LONG)w->Width - w->BorderRight - 1;
+        LONG maxy = (LONG)w->Height - w->BorderBottom - 1;
+
+        if (inner->MaxX > maxx)
+            inner->MaxX = maxx;
+        if (inner->MaxY > maxy)
+            inner->MaxY = maxy;
+    }
+}
+
+/*
  * Copy the tracker's result into the request and tell the compositor.
  * fb->lock held.
  */
@@ -63,6 +95,9 @@ static void sfb_PushGeometry(struct GalliumScanoutFB *fb)
 
     fb->req.Dest  = fb->track.Dest;
     fb->req.Shape = fb->track.Shape;
+    /* the part shown, never scaled */
+    fb->req.Src.MaxX = fb->req.Dest.MaxX - fb->req.Dest.MinX;
+    fb->req.Src.MaxY = fb->req.Dest.MaxY - fb->req.Dest.MinY;
 
     if (fb->attached)
         HIDD_Display_UpdateSurface(fb->display, &fb->req);
@@ -74,15 +109,125 @@ static void sfb_PushGeometry(struct GalliumScanoutFB *fb)
  */
 static void sfb_Refresh(struct GalliumScanoutFB *fb)
 {
+    struct Rectangle inner;
+
     if (!fb->attached || !fb->window)
         return;
 
     if (!st_IsStale(&fb->track))
         return;
 
-    if (st_Compute(&fb->track, fb->window, &fb->inner, NULL, NULL, TRUE) &&
+    sfb_Inner(fb, &inner);
+    if (st_Compute(&fb->track, fb->window, &inner, NULL, NULL, TRUE) &&
         st_Changed(&fb->track))
         sfb_PushGeometry(fb);
+}
+
+/*
+ * The hook left a recompute behind: wake the helper. Must not block.
+ */
+static void sfb_Defer(struct GalliumScanoutFB *fb)
+{
+    struct Library *GalliumBase = fb->base;
+
+    Forbid();
+    if (GB(GalliumBase)->sfbProc)
+        Signal(&GB(GalliumBase)->sfbProc->pr_Task, SIGBREAKF_CTRL_F);
+    Permit();
+}
+
+/*
+ * The helper process: does the recomputes the hook deferred. It may block
+ * on the layer lock, so it gets the geometry the layer operation ends with.
+ * Runs while a scan-out framebuffer exists; CTRL-C from sfb_StopHelper()
+ * ends it.
+ */
+AROS_PROCH(sfb_Helper, argstr, argsize, sysBase)
+{
+    AROS_PROCFUNC_INIT
+
+    struct Library *GalliumBase = FindTask(NULL)->tc_UserData;
+    struct GalliumScanoutFB *fb;
+    ULONG sigs;
+
+    for (;;)
+    {
+        sigs = Wait(SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_F);
+        if (sigs & SIGBREAKF_CTRL_C)
+            break;
+
+        ObtainSemaphore(&GB(GalliumBase)->sfbLock);
+        ForeachNode(&GB(GalliumBase)->sfbList, fb)
+        {
+            ObtainSemaphore(&fb->lock);
+            sfb_Refresh(fb);
+            ReleaseSemaphore(&fb->lock);
+        }
+        ReleaseSemaphore(&GB(GalliumBase)->sfbLock);
+    }
+
+    /* sfb_StopHelper() left its task in tc_UserData. The Forbid() ends with
+     * this task: the waiter runs after we are gone. */
+    Forbid();
+    Signal((struct Task *)FindTask(NULL)->tc_UserData, SIGF_SINGLE);
+
+    return 0;
+
+    AROS_PROCFUNC_EXIT
+}
+
+/* A framebuffer was created. sfbLock held. Without the helper the
+ * framebuffer still works, as before: deferred recomputes wait for a swap. */
+static void sfb_StartHelper(struct Library *GalliumBase)
+{
+    if (GB(GalliumBase)->sfbCount++ == 0 && !GB(GalliumBase)->sfbProc)
+    {
+        struct TagItem tags[] =
+        {
+            { NP_Entry,     (IPTR)sfb_Helper           },
+            { NP_Name,      (IPTR)"gallium scan-out"   },
+            { NP_Priority,  1                          },
+            { NP_UserData,  (IPTR)GalliumBase          },
+            { NP_Input,     0                          },
+            { NP_Output,    0                          },
+            { NP_Error,     0                          },
+            { NP_CurrentDir, 0                         },
+            { NP_CopyVars,  FALSE                      },
+            { NP_WindowPtr, (IPTR)-1                   },
+            { TAG_DONE,     0                          }
+        };
+        struct Process *proc = CreateNewProc(tags);
+
+        Forbid();
+        GB(GalliumBase)->sfbProc = proc;
+        Permit();
+    }
+}
+
+/* A framebuffer is gone. Called without any lock (the helper takes them);
+ * the last one ends the helper and waits for it. */
+static void sfb_StopHelper(struct Library *GalliumBase)
+{
+    struct Process *proc = NULL;
+
+    ObtainSemaphore(&GB(GalliumBase)->sfbLock);
+    if (--GB(GalliumBase)->sfbCount == 0)
+    {
+        Forbid();
+        proc = GB(GalliumBase)->sfbProc;
+        GB(GalliumBase)->sfbProc = NULL;
+        Permit();
+    }
+    ReleaseSemaphore(&GB(GalliumBase)->sfbLock);
+
+    /* Not under sfbLock: the helper may be waiting for it */
+    if (proc)
+    {
+        proc->pr_Task.tc_UserData = FindTask(NULL);
+        SetSignal(0, SIGF_SINGLE);
+        Signal(&proc->pr_Task, SIGBREAKF_CTRL_C);
+        Wait(SIGF_SINGLE);
+    }
 }
 
 /*
@@ -97,6 +242,8 @@ AROS_UFH3(static IPTR, sfb_SurfaceHook,
     AROS_USERFUNC_INIT
 
     struct GalliumScanoutFB *fb = hook->h_Data;
+    struct Rectangle inner;
+    BOOL deferred = FALSE;
 
     if (!msg)
         return 0;
@@ -123,19 +270,26 @@ AROS_UFH3(static IPTR, sfb_SurfaceHook,
     if (!AttemptSemaphore(&fb->lock))
     {
         st_SetStale(&fb->track);
+        sfb_Defer(fb);
         return 0;
     }
 
     if (fb->attached && fb->window)
     {
-        if (st_HookDamageRect(&fb->track, msg, &fb->inner))
+        sfb_Inner(fb, &inner);
+        if (st_HookDamageRect(&fb->track, msg, &inner))
         {
             st_Changed(&fb->track);
             sfb_PushGeometry(fb);
         }
+        if (st_IsStale(&fb->track))
+            deferred = TRUE;
     }
 
     ReleaseSemaphore(&fb->lock);
+
+    if (deferred)
+        sfb_Defer(fb);
 
     return 0;
 
@@ -438,6 +592,7 @@ void gallium_sfb_CloseNotify(struct Window *window, APTR userData)
     fb->window   = window;
     fb->attached = TRUE;
     AddTail((struct List *)&GB(GalliumBase)->sfbList, (struct Node *)&fb->node);
+    sfb_StartHelper(GalliumBase);
     ReleaseSemaphore(&GB(GalliumBase)->sfbLock);
 
     val = 0;
@@ -589,6 +744,8 @@ void gallium_sfb_CloseNotify(struct Window *window, APTR userData)
     sfb_Detach(sfb);
     ReleaseSemaphore(&sfb->lock);
     ReleaseSemaphore(&GB(GalliumBase)->sfbLock);
+
+    sfb_StopHelper(GalliumBase);
 
     D(bug("[Gallium] %s: fb %p after %lu swaps\n", __func__, sfb, (unsigned long)sfb->swaps));
 

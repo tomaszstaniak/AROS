@@ -139,19 +139,34 @@
         }
     }
 
-    /* Notify the bitmap about blitting */
+    /* Tell the display about the blit, the way graphics.library does after
+     * every rendering operation: while it composes, the compositor shows
+     * the changed rectangle (the bitmap's own UpdateRect never reaches it);
+     * otherwise the display passes the change on to the bitmap. */
     if (copied)
     {
-        struct pHidd_BitMap_UpdateRect urmsg = {
-            .mID    =   ((struct GalliumBase *)GalliumBase)->galliumMId_UpdateRect,
-            .x      =   renderableLayerRect.MinX,
-            .y      =   renderableLayerRect.MinY,
-            .width  =   renderableLayerRect.MaxX - renderableLayerRect.MinX + 1,
-            .height =   renderableLayerRect.MaxY - renderableLayerRect.MinY + 1
-        };
-        
         OOP_Object * bm = HIDD_BM_OBJ(destRP->BitMap);
-        OOP_DoMethod(bm, (OOP_Msg)&urmsg);
+        IPTR display = 0;
+        WORD x = renderableLayerRect.MinX;
+        WORD y = renderableLayerRect.MinY;
+        UWORD width  = renderableLayerRect.MaxX - renderableLayerRect.MinX + 1;
+        UWORD height = renderableLayerRect.MaxY - renderableLayerRect.MinY + 1;
+
+        OOP_GetAttr(bm, aHidd_BitMap_Display, &display);
+        if (display)
+            HIDD_Display_UpdateRect((OOP_Object *)display, bm, x, y, width, height);
+        else
+        {
+            struct pHidd_BitMap_UpdateRect urmsg = {
+                .mID    =   ((struct GalliumBase *)GalliumBase)->galliumMId_UpdateRect,
+                .x      =   x,
+                .y      =   y,
+                .width  =   width,
+                .height =   height
+            };
+
+            OOP_DoMethod(bm, (OOP_Msg)&urmsg);
+        }
     }
 
     UnlockLayerRom(L);

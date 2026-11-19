@@ -14,6 +14,8 @@
 #include "util/u_inlines.h"
 
 
+#include <graphics/clip.h>
+#include <graphics/rastport.h>
 #include <proto/exec.h>
 #include <proto/gallium.h>
 
@@ -98,9 +100,30 @@
             /* gallium.library tries the whole-window DisplayResourceRP method
              * first (vc4 presents zero-copy there) and falls back to the
              * per-cliprect DisplayResource loop (softpipe). */
-            BltPipeResourceRastPort(_ctx->driver, _ctx->framebuffer->render_resource, 0, 0,
-                _ctx->visible_rp, _ctx->left, _ctx->top,
-                _ctx->framebuffer->width, _ctx->framebuffer->height);
+            /* The frame has the size the drawing area had when it was
+             * rendered. After the window has shrunk it is larger than the
+             * area is now, and the blit is clipped to the layer only: keep
+             * it off the right and bottom border. */
+            LONG width = _ctx->framebuffer->width;
+            LONG height = _ctx->framebuffer->height;
+            struct Layer *layer = _ctx->visible_rp->Layer;
+
+            if (layer)
+            {
+                LONG areawidth = (layer->bounds.MaxX - layer->bounds.MinX + 1)
+                    - _ctx->left - _ctx->right;
+                LONG areaheight = (layer->bounds.MaxY - layer->bounds.MinY + 1)
+                    - _ctx->top - _ctx->bottom;
+
+                if (width > areawidth)
+                    width = areawidth;
+                if (height > areaheight)
+                    height = areaheight;
+            }
+
+            if (width > 0 && height > 0)
+                BltPipeResourceRastPort(_ctx->driver, _ctx->framebuffer->render_resource, 0, 0,
+                    _ctx->visible_rp, _ctx->left, _ctx->top, width, height);
         }
     }
 

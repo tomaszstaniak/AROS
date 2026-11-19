@@ -109,6 +109,8 @@ struct GalliumBase
     struct MinList              sfbList;         /* attached GalliumScanoutFB          */
     struct SurfaceTrackNotify   sfbNotify;
     BOOL                        sfbNotifyActive;
+    ULONG                       sfbCount;        /* framebuffers created, not yet destroyed */
+    struct Process              *sfbProc;        /* deferred recomputes; while sfbCount > 0 */
 
     /* timer.device for the damage hook rate limit (ReadEClock only) */
     struct MsgPort              *timerMP;
