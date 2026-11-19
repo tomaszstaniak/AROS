@@ -12,6 +12,7 @@
 #include <devices/inputevent.h>
 #include <exec/alerts.h>
 #include <exec/memory.h>
+#include <graphics/driver.h>
 #include <hidd/hidd.h>
 #include <hidd/gfx.h>
 #include <hidd/pci.h>
@@ -146,6 +147,23 @@ OOP_Object *EFIFBGfx__Root__New(OOP_Class *cl, OOP_Object *o, struct pRoot_New *
     /* There is one firmware framebuffer; refuse a second driver object */
     if (XSD(cl)->efifbgfxhidd)
         return NULL;
+
+#ifdef FB_NATIVE_HANDOVER
+    /* A driver built on this frontend for real hardware: take down the boot
+     * displays that still write to the firmware framebuffer of that card. */
+    {
+        struct DisplayHandover *handover =
+            (struct DisplayHandover *)GetTagData(DDRVA_Handover, 0, msg->attrList);
+
+        if (handover)
+        {
+            APTR boot;
+
+            while ((boot = handover->dho_FindDisplay(handover->dho_Context, NULL)))
+                handover->dho_ExpungeDisplay(handover->dho_Context, boot);
+        }
+    }
+#endif
 
     if ((msgNewTags[3].ti_Data = (IPTR)msg->attrList) == 0)
         msgNewTags[3].ti_Tag = TAG_DONE;

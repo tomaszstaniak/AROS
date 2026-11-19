@@ -150,8 +150,7 @@ static int EFIFBGfx_Init(LIBBASETYPEPTR LIBBASE)
 
                 /* Fixed boot display: instantiate when graphics requests a mode,
                  * after the deferred UI dependencies have been initialized. */
-                err = AddDisplayDriver(xsd->efifbgfxclass, NULL,
-                                       DDRV_BootMode, TRUE, TAG_DONE);
+                err = AddDisplayDriver(xsd->efifbgfxclass, NULL, TAG_DONE);
 
                 bug("[VirtioGfx] AddDisplayDriver result %u\n", err);
                 if (!err)

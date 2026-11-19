@@ -35,4 +35,6 @@ struct VirtioGfxBase {
 #define FB_DRIVER_NAME "virtiogfx.hidd"
 #define FB_HARDWARE_NAME "Virtio GPU 2D"
 #define FB_PRODUCER_NAME "Virtio"
+/* Registered as a native driver: it takes the screen over from the boot display. */
+#define FB_NATIVE_HANDOVER
 #endif
