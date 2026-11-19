@@ -14,6 +14,8 @@
 #include "frontend/api.h"
 #include "state_tracker/st_context.h"
 
+struct mesa3dgl_drawable;
+
 struct mesa3dgl_framebuffer
 {
     struct pipe_frontend_drawable base;
@@ -32,8 +34,9 @@ struct mesa3dgl_framebuffer
      * display can show the colour buffers itself, the FRONT_LEFT attachment
      * is the scan-out buffer being rendered (scanout_back) instead of a
      * resource of our own; glASwapBuffers() flips it. NULL = the
-     * BltPipeResourceRastPort() path. */
-    struct mesa3dgl_context     *ctx;
+     * BltPipeResourceRastPort() path. The drawable is the one whose pixels
+     * this framebuffer keeps (a context's own target or an independent one). */
+    struct mesa3dgl_drawable    *drawable;
     APTR                        scanout;
     struct Window               *scanout_window; /* window/rectangle it was made for */
     LONG                        scanout_left;
@@ -45,14 +48,25 @@ struct mesa3dgl_framebuffer
     int                         scanout_vsync;   /* swap interval applied to the scan-out framebuffer, -1 = not yet */
 };
 
-/* mesa/gallium GL context */
-struct mesa3dgl_context
+/* The pipe screen and state tracker manager that contexts sharing objects
+ * or a screen have in common; contexts and independent drawables retain them. */
+struct mesa3dgl_screen
 {
-    APTR                                driver;
-    struct st_context           *st;
-    struct st_visual            stvis;
+    APTR                        driver;
     struct pipe_frontend_screen *stmanager;
+    ULONG                       refs;
+};
 
+/* What a context draws to (a GLADrawable): a window, a rastport or an
+ * offscreen bitmap, and the Gallium framebuffer that holds its pixels. A
+ * context owns one (its target from glACreateContext and glASetRast); an
+ * EGL surface owns another through glACreateDrawable. */
+struct mesa3dgl_drawable
+{
+    /* Independent drawables hold one provider reference. A context's own
+     * target borrows its context's reference and leaves this NULL. */
+    struct mesa3dgl_screen      *shared;
+    APTR                        driver;         /* the pipe driver that presents it */
     struct mesa3dgl_framebuffer *framebuffer;
     struct Window               *window;
     struct Screen               *Screen;
@@ -60,9 +74,29 @@ struct mesa3dgl_context
     struct RastPort             *visible_rp;
     ULONG                       visible_rp_width;
     ULONG                       visible_rp_height;
-    ULONG                      top, bottom;
-    ULONG                      left, right;
-    int                        swap_interval;   /* GLA_SwapInterval / glASwapInterval() */
+    ULONG                       top, bottom;
+    ULONG                       left, right;
+
+    /* An offscreen target (no window, screen or rastport): a bitmap the
+     * drawable allocated, a friend of the default public screen's, on a
+     * layer of its own. NULL for a visible target. */
+    struct BitMap               *offscreen_bm;
+    struct Layer_Info           *offscreen_li;
+    struct Layer                *offscreen_layer;
+};
+
+/* mesa/gallium GL context */
+struct mesa3dgl_context
+{
+    APTR                                driver;
+    struct st_context           *st;
+    struct st_visual            stvis;
+    struct pipe_frontend_screen *stmanager;
+    struct mesa3dgl_screen      *shared;
+
+    struct mesa3dgl_drawable    own;            /* its own target */
+    struct mesa3dgl_drawable    *draw, *read;   /* bound now (NULL: none) */
+    int                         swap_interval;  /* GLA_SwapInterval / glASwapInterval() */
 };
 
 /*  state trackers GL API */

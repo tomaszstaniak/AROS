@@ -86,6 +86,8 @@ struct GalliumBase
     struct Library              *vulkanhidd;     /* for a display's Vulkan object */
     struct Library              *zinkhidd;       /* GL on that Vulkan object */
     struct Library              *lavapipehidd;   /* the software Vulkan driver, for the zink fallback */
+    /* softpipe, when the ENV:SYS/Gallium.default driver cannot be had */
+    struct Library              *softpipemodule;
 
     OOP_Class                   *basegallium;
     OOP_AttrBase                gfxAttrBase;
@@ -114,6 +116,7 @@ struct GalliumBase
     struct MsgPort              *timerMP;
     struct timerequest          *timerIO;
     struct SurfaceTrackCtx      stctx;
+    OOP_MethodID                galliumMId_ReleaseRastPort;
 };
 
 /*

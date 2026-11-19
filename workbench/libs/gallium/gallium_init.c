@@ -114,6 +114,7 @@ static int Init(LIBBASETYPEPTR LIBBASE)
     LIBBASE->galliumMId_DisplayResource = OOP_GetMethodID(IID_Hidd_Gallium, moHidd_Gallium_DisplayResource);
     LIBBASE->galliumMId_DisplayResourceRP = OOP_GetMethodID(IID_Hidd_Gallium, moHidd_Gallium_DisplayResourceRP);
     LIBBASE->galliumMId_ResourceFromBitMap = OOP_GetMethodID(IID_Hidd_Gallium, moHidd_Gallium_ResourceFromBitMap);
+    LIBBASE->galliumMId_ReleaseRastPort = OOP_GetMethodID(IID_Hidd_Gallium, moHidd_Gallium_ReleaseRastPort);
     LIBBASE->bmMethodBase = OOP_GetMethodID(IID_Hidd_BitMap, 0);
     LIBBASE->displayMethodBase = OOP_GetMethodID(IID_Hidd_Display, 0);
     LIBBASE->basebm = OOP_FindClass(CLID_Hidd_BitMap);
@@ -165,6 +166,9 @@ static int Expunge(LIBBASETYPEPTR LIBBASE)
 
     if (LIBBASE->vulkanhidd)
         CloseLibrary(LIBBASE->vulkanhidd);
+
+    if (LIBBASE->softpipemodule)
+        CloseLibrary(LIBBASE->softpipemodule);
 
     if ((CONST_STRPTR)LIBBASE->fallback != softpipe_str)
         FreeVec(LIBBASE->fallback);
