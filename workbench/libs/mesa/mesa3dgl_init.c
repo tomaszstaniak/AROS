@@ -27,3 +27,7 @@ VOID MESA3DGLExit()
 ADD2INIT(MESA3DGLInit, 5);
 ADD2EXIT(MESA3DGLExit, 5);
 
+
+/* LOCAL ONLY, not for submission: the Mesa patch still has weak references to
+ * this symbol (scissor.c, viewport.c) although render scaling was dropped. */
+unsigned int mesa3dgl_render_scale = 1;
