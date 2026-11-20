@@ -272,6 +272,11 @@ static void gpu_owned_complete(struct VirtioGPU *gpu, int success)
 /* An interrupt is a wakeup hint, not ownership of a particular descriptor.
  * Observe the device's publication before reading its response. DMA memory on
  * the supported transport is coherent; this barrier orders those reads. */
+/* Commands are not fenced. Every command here waits for its completion
+ * anyway, and QEMU answers an unfenced command as soon as it has processed
+ * it, in submission order. A fenced one is answered only when its fence is
+ * polled, every 10 ms, which made each command cost about 10 ms. */
+#define GPU_FENCE_COMMANDS 0
 static int gpu_reap(struct VirtioGPU *gpu)
 {
     struct virtio_queue *q=gpu->device.dev_VQ;
@@ -285,7 +290,8 @@ static int gpu_reap(struct VirtioGPU *gpu)
     UQUAD fence=response->fence;
     gpu->pending=FALSE;
     if(id || len<sizeof(struct GPUHeader) || len>gpu->pending_bytes ||
-       !(flags&GPU_FLAG_FENCE) || fence!=gpu->fence) {
+       (GPU_FENCE_COMMANDS ? (!(flags&GPU_FLAG_FENCE) || fence!=gpu->fence)
+                           : (flags&GPU_FLAG_FENCE)!=0)) {
         bug("[VirtioGfx] invalid completion used=%u id=%lu len=%lu/%lu type=%lx/%lx flags=%lx fence=%lu/%lu\n",
             (unsigned)used,(unsigned long)id,(unsigned long)len,(unsigned long)gpu->pending_bytes,
             (unsigned long)type,(unsigned long)gpu->pending_type,(unsigned long)flags,
@@ -323,7 +329,8 @@ static int gpu_command(struct VirtioGPU *gpu,unsigned request_bytes,
     struct virtio_queue *q=dev->dev_VQ;
     struct GPUHeader *request=memory,*response=(void *)((UBYTE *)memory+GPU_REQUEST_BYTES);
     UWORD next=q->q_Avail->idx+1;
-    request->flags=1;request->fence=++gpu->fence;
+    if(GPU_FENCE_COMMANDS){request->flags=1;request->fence=++gpu->fence;}
+    else {request->flags=0;request->fence=0;}
     gpu->pending=TRUE;gpu->pending_next=next;
     gpu->pending_bytes=response_bytes;gpu->pending_type=response_type;
     memset(response,0,response_bytes);

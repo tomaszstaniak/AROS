@@ -49,7 +49,7 @@ USER_CFLAGS += -Wall -Werror=implicit-function-declaration
 # Native transport/winsys only; the client Mesa module owns the driver core.
 USER_LDFLAGS := -nostdc -noposixc
 %build_module mmake=hidd-virgl-prototype modname=virgl modtype=hidd \
-    files="virgl_init virgl_galliumclass virgl_winsys_aros virgl_transport" \
+    files="virgl_init virgl_galliumclass virgl_winsys_aros virgl_transport virgl_stats" \
     uselibs="" objdir="$(OBJDIR)/$(MESAGLVERSION)"
 
 %common

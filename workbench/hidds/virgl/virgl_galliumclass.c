@@ -9,6 +9,7 @@
 #include <hidd/gallium.h>
 #include <gallium/gallium.h>
 #include "pipe/p_screen.h"
+#include "virgl_stats.h"
 
 #include "virgl/virgl_resource.h"
 #include "virgl_winsys_aros.h"
@@ -109,12 +110,17 @@ VOID METHOD(HiddVirgl,Hidd_Gallium,DisplayResource)
       case PIPE_FORMAT_B8G8R8A8_SRGB:case PIPE_FORMAT_B8G8R8X8_SRGB:format=RECTFMT_BGRA32;break;
       default:bug("[virgl.hidd] unsupported presentation format %u\n",res->b.format);return;
     }
+    UQUAD t0=avgl_stat_now(),t1;
     if(!avgl_read_resource(d->winsys,res->hw_res,res->b.width0,res->b.height0,res->metadata.stride[0]))return;
+    avgl_stat_add(AVGL_ST_PRESENT_READ,t0,res->metadata.stride[0]*res->b.height0);
     pixels=d->winsys->resource_map(d->winsys,res->hw_res);
     if(!pixels)return;
     rp=CreateRastPort();if(!rp)return;
     rp->BitMap=msg->bitmap;
+    t1=avgl_stat_now();
     WritePixelArray(pixels,msg->srcx,msg->srcy,
         res->metadata.stride[0],rp,msg->dstx,msg->dsty,msg->width,msg->height,format);
+    avgl_stat_add(AVGL_ST_PRESENT_COPY,t1,msg->width*msg->height*4);
     FreeRastPort(rp);
+    avgl_stat_add(AVGL_ST_PRESENT,t0,0);
 }
