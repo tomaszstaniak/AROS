@@ -12,6 +12,7 @@
 #include "virgl_winsys_aros.h"
 #include "virgl_transport.h"
 #include "virgl_native.h"
+#include "virgl_stats.h"
 
 struct avgl_ws;
 struct virgl_hw_res {
@@ -91,6 +92,7 @@ static struct virgl_hw_res *ws_resource_create(struct virgl_winsys *vws,
         .depth=depth,.array_size=array_size,.last_level=last_level,.samples=samples,.flags=flags};
     struct render_resource attach={.header.type=GPU_CTX_ATTACH_RESOURCE,.header.context=ws->transport.context};
     struct render_backing backing={.header.type=GPU_ATTACH_BACKING,.count=1,.length=size};
+    UQUAD t0=avgl_stat_now();
     (void)front;
     ObtainSemaphore(&ws->mutex);
     if (!avgl_healthy(&ws->transport) || !size) goto done;
@@ -116,6 +118,7 @@ static struct virgl_hw_res *ws_resource_create(struct virgl_winsys *vws,
     FreeVec(res);res=NULL;
  done:
     ReleaseSemaphore(&ws->mutex);
+    avgl_stat_add(AVGL_ST_CREATE,t0,size);
     return res;
 }
 static int ws_transfer(struct virgl_winsys *vws,struct virgl_hw_res *res,
@@ -129,6 +132,7 @@ static int ws_transfer(struct virgl_winsys *vws,struct virgl_hw_res *res,
         .offset=offset,.level=level,.stride=stride,.layer_stride=layer_stride};
     ULONG flags=upload?DMA_ReadFromRAM:0;
     bool ok=false;
+    UQUAD t0=avgl_stat_now();
     ObtainSemaphore(&ws->mutex);
     if (offset>=res->size || box->x<0 || box->y<0 || box->z<0 ||
         box->width<=0 || box->height<=0 || box->depth<=0) goto done;
@@ -140,6 +144,7 @@ static int ws_transfer(struct virgl_winsys *vws,struct virgl_hw_res *res,
      * transfer invalidates this client's stream, not the shared device. */
     if(!ok)ws->transport.failed=TRUE;
     ReleaseSemaphore(&ws->mutex);
+    avgl_stat_add(upload?AVGL_ST_PUT:AVGL_ST_GET,t0,(ULONG)box->height*stride);
     return ok?0:-1;
 }
 static int ws_put(struct virgl_winsys *ws,struct virgl_hw_res *r,const struct pipe_box *b,
@@ -226,6 +231,7 @@ static int ws_submit(struct virgl_winsys *vws,struct virgl_cmd_buf *base,struct 
     struct avgl_ws *ws=ws_cast(vws);struct avgl_cb *cb=(struct avgl_cb*)base;
     struct submit_header {struct gpu_header header;ULONG size,padding;} *req=NULL;
     bool ok;
+    UQUAD t0=avgl_stat_now();ULONG words=base->cdw;
     ObtainSemaphore(&ws->mutex);
     ok=avgl_healthy(&ws->transport);
     if(fence)*fence=NULL;
@@ -246,6 +252,7 @@ static int ws_submit(struct virgl_winsys *vws,struct virgl_cmd_buf *base,struct 
     if(!ok && fence){FreeVec(*fence);*fence=NULL;}
     FreeVec(req);release_references(cb);base->cdw=0;
     ReleaseSemaphore(&ws->mutex);
+    avgl_stat_add(AVGL_ST_SUBMIT,t0,words*4);
     return ok?0:-1;
 }
 static int ws_caps(struct virgl_winsys *vws,struct virgl_drm_caps *caps)
@@ -281,6 +288,7 @@ void avgl_winsys_dispose(struct virgl_winsys *vws)
 {
     struct avgl_ws *ws=ws_cast(vws);
     if(!ws)return;
+    avgl_stat_report("context ends");
     ObtainSemaphore(&ws->mutex);
     while(ws->resources){
         struct virgl_hw_res *r=ws->resources;ws->resources=r->next;

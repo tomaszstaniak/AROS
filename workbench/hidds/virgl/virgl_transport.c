@@ -6,6 +6,7 @@
 #include <aros/debug.h>
 #include "virgl_transport.h"
 #include "virgl_native.h"
+#include "virgl_stats.h"
 static OOP_MethodID method(ULONG i){return OOP_GetMethodID(IID_Hidd_VirtioGPU,i);}
 void avgl_manager_init(struct avgl_manager *m,struct Library *u)
 {
@@ -27,7 +28,10 @@ BOOL avgl_healthy(struct avgl_transport *s)
 static BOOL command(struct avgl_transport *s,const void *p,ULONG n,ULONG type,ULONG size,void *out)
 {
     struct pHidd_VirtioGPU_Command msg={method(moHidd_VirtioGPU_Command),p,n,out,size,type};
-    return s->service && OOP_DoMethod(s->service,(OOP_Msg)&msg);
+    UQUAD t=avgl_stat_now();
+    BOOL ok=s->service && OOP_DoMethod(s->service,(OOP_Msg)&msg);
+    avgl_stat_add(AVGL_ST_COMMAND,t,n);
+    return ok;
 }
 BOOL avgl_command(struct avgl_transport *s,const void *p,ULONG n,ULONG type,ULONG min,ULONG *got,BOOL fenced)
 {

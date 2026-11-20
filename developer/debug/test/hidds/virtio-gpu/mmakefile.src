@@ -8,6 +8,10 @@ USER_CFLAGS := -Wall -Wextra -Werror=implicit-function-declaration
 %build_progs mmake=test-virgl-gl \
     files=virglglprobe uselibs="GL" targetdir=$(AROS_TESTS)/hidds/gfx
 
+#MM test-virgl-timing : includes linklibs
+%build_progs mmake=test-virgl-timing \
+    files="glcheck glstress" uselibs="GL" targetdir=$(AROS_TESTS)/hidds/gfx
+
 #MM test-virtio-shared : includes linklibs kernel-hidd-virtiogfx-includes
 %build_progs mmake=test-virtio-shared \
     files=virtiosharedtest uselibs="hiddstubs" targetdir=$(AROS_TESTS)/hidds/gfx
