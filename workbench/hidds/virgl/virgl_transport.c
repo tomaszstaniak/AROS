@@ -15,6 +15,7 @@ void avgl_manager_init(struct avgl_manager *m,struct Library *u)
     m->utility_base=u;
     m->references=0;
     m->service=NULL;
+    m->error=NULL;
     m->initialized=TRUE;
 }
 BOOL avgl_manager_can_expunge(struct avgl_manager *m)
@@ -141,7 +142,9 @@ BOOL avgl_open(struct avgl_transport *s,struct avgl_manager *m)
     avgl_native_clear(m->utility_base,s,sizeof(*s));
     s->manager=m;
     s->utility_base=m->utility_base;
+    m->error="host is busy with an earlier command";
     if(!m->service || !OOP_DoMethod(m->service,(OOP_Msg)&acquire))return FALSE;
+    m->error="host did not answer a capability query";
     s->service=m->service;
     ObtainSemaphore(&m->mutex);
     m->references++;
@@ -152,9 +155,11 @@ BOOL avgl_open(struct avgl_transport *s,struct avgl_manager *m)
         struct capset_info info;
         if(!command(s,&query,sizeof(query),GPU_OK_CAPSET_INFO,sizeof(info),&info))goto fail;
         if(info.id!=GPU_CAPSET_VIRGL)continue;
-        if(!info.size || info.size>sizeof(s->caps)-sizeof(struct gpu_header))goto fail;
+        if(!info.size || info.size>sizeof(s->caps)-sizeof(struct gpu_header)){
+            m->error="host offers a VirGL capability set this driver cannot read";goto fail;
+        }
         UBYTE *data=AllocVec(sizeof(struct gpu_header)+info.size,MEMF_PUBLIC);
-        if(!data)goto fail;
+        if(!data){m->error="not enough memory";goto fail;}
         query.header.type=GPU_GET_CAPSET;
         query.id=GPU_CAPSET_VIRGL;
         query.version=info.version;
@@ -167,12 +172,17 @@ BOOL avgl_open(struct avgl_transport *s,struct avgl_manager *m)
         if(!ok)goto fail;
         break;
     }
-    if(!s->caps_size || !(s->context=OOP_DoMethod(s->service,(OOP_Msg)&id)))goto fail;
+    if(!s->caps_size){m->error="host offers no VirGL capability set";goto fail;}
+    if(!(s->context=OOP_DoMethod(s->service,(OOP_Msg)&id))){m->error="no free VirGL context number";goto fail;}
     req.header.context=s->context;
-    if(!command(s,&req,sizeof(req),GPU_OK_NODATA,sizeof(reply),&reply))goto fail;
+    if(!command(s,&req,sizeof(req),GPU_OK_NODATA,sizeof(reply),&reply)){
+        m->error="host refused a VirGL context";goto fail;
+    }
     s->context_created=TRUE;
+    m->error=NULL;
     return TRUE;
 fail:
+    if(avgl_busy(s))m->error="host is busy with an earlier command";
     avgl_close(s);
     return FALSE;
 }

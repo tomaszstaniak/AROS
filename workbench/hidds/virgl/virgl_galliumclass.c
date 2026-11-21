@@ -34,6 +34,33 @@ void avgl_report(const char *status)
     SetVar("VirGL-Status",status,-1,GVF_GLOBAL_ONLY|LV_VAR);
     CloseLibrary(DOSBase);
 }
+/* "softpipe: <why>". No sprintf: this module is resident (see gallium.library). */
+static void report_softpipe(const char *why)
+{
+    static const char head[]="softpipe: ";
+    char text[128];
+    ULONG n=0;
+    for(const char *c=head;*c;c++)text[n++]=*c;
+    for(const char *c=why;*c && n<sizeof(text)-1;c++)text[n++]=*c;
+    text[n]=0;
+    avgl_report(text);
+}
+/* The winsys and the screen for this object; call with screen_lock held. */
+static struct pipe_screen *create_screen(OOP_Class *cl,struct HiddGalliumVirglData *d)
+{
+    if(!d->winsys && !d->screen && d->factory.module){
+        d->winsys=avgl_winsys_create(&d->winsys,&d->factory,&d->manager,&SD(cl)->registry);
+        if(d->winsys){
+            d->screen=d->factory.create(d->factory.module,GALLIUM_SCREEN_BACKEND_VIRGL,d->winsys);
+            /* A failed core constructor may already consume the winsys;
+             * its native destroy clears this owner slot. */
+            if(!d->screen && d->winsys)avgl_winsys_dispose(d->winsys);
+            if(!d->screen)d->manager.error="Mesa could not set up a VirGL screen";
+            else{avgl_activity.gave_up=FALSE;avgl_report("virgl");}
+        }
+    }
+    return d->screen;
+}
 OOP_Object *METHOD(HiddVirgl,Root,New)
 {
     if(GetTagData(aHidd_Gallium_InterfaceVersion,-1,msg->attrList)!=GALLIUM_INTERFACE_VERSION)return NULL;
@@ -61,6 +88,16 @@ OOP_Object *METHOD(HiddVirgl,Root,New)
             OOP_DisposeObject(o);return NULL;
         }
         d->manager.service=service;
+        /* Make the screen now: a pipe that cannot get one would leave the
+         * program without OpenGL, while a refusal here lets gallium.library
+         * fall back to softpipe. */
+        ObtainSemaphore(&d->screen_lock);
+        struct pipe_screen *screen=create_screen(cl,d);
+        ReleaseSemaphore(&d->screen_lock);
+        if(!screen){
+            report_softpipe(d->manager.error?d->manager.error:"VirGL not usable");
+            OOP_DisposeObject(o);return NULL;
+        }
     }
     return o;
 }
@@ -90,16 +127,7 @@ APTR METHOD(HiddVirgl,Hidd_Gallium,CreatePipeScreen)
     struct HiddGalliumVirglData *d=OOP_INST_DATA(cl,o);
     struct pipe_screen *screen=NULL;
     ObtainSemaphore(&d->screen_lock);
-    if(!d->winsys && !d->screen && d->factory.module){
-        d->winsys=avgl_winsys_create(&d->winsys,&d->factory,&d->manager,&SD(cl)->registry);
-        if(d->winsys){
-            d->screen=d->factory.create(d->factory.module,GALLIUM_SCREEN_BACKEND_VIRGL,d->winsys);
-            /* A failed core constructor may already consume the winsys;
-             * its native destroy clears this owner slot. */
-            if(!d->screen && d->winsys)avgl_winsys_dispose(d->winsys);
-            if(d->screen){avgl_activity.gave_up=FALSE;avgl_report("virgl");}
-        }
-    }
+    create_screen(cl,d);
     screen=d->screen;
     ReleaseSemaphore(&d->screen_lock);
     return screen;
