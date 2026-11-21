@@ -512,17 +512,27 @@ BOOL VirtioGPUAcquire(struct VirtioGPU *gpu)
     ReleaseSemaphore(&gpu->lock);
     return okay;
 }
-BOOL VirtioGPUHasVirGL(struct VirtioGPU *gpu)
+/* Why a new VirGL client cannot start now, or NULL when it can. */
+const char *VirtioGPUVirGLMissing(struct VirtioGPU *gpu)
 {
-    BOOL okay = FALSE;
+    const char *why = NULL;
     if (!gpu)
-        return FALSE;
+        return "no VirtIO-GPU device";
     ObtainSemaphore(&gpu->lock);
     if (gpu->pending)
         gpu_reap(gpu);
-    okay = gpu->ready && !gpu->failed && !gpu->pending && (gpu->device.dev_Features & 1);
+    if (!(gpu->device.dev_Features & 1))
+        why = "card has no 3D (start QEMU with virtio-vga-gl and an OpenGL display)";
+    else if (!gpu->ready || gpu->failed)
+        why = "the VirtIO-GPU device has failed";
+    else if (gpu->pending)
+        why = "host is busy with an earlier command";
     ReleaseSemaphore(&gpu->lock);
-    return okay;
+    return why;
+}
+BOOL VirtioGPUHasVirGL(struct VirtioGPU *gpu)
+{
+    return !VirtioGPUVirGLMissing(gpu);
 }
 static struct GPUAllocation *gpu_allocation(struct VirtioGPU *gpu, APTR owner, APTR pointer)
 {

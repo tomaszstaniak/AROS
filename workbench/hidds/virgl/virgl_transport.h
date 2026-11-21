@@ -14,6 +14,8 @@ struct avgl_manager {
     ULONG references;
     BOOL initialized;
     OOP_Object *service;
+    /* Why the last avgl_open on this manager failed, for ENV:VirGL-Status. */
+    const char *error;
 };
 /* Winsys client state. Physical ownership and quarantine stay in virtiogfx. */
 struct avgl_transport {

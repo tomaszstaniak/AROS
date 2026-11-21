@@ -2,6 +2,9 @@
     Licensed under the AROS Public License (APL) Version 1.1. */
 #include "frontend.h"
 #include <hidd/gallium.h>
+#include <dos/var.h>
+#include <exec/tasks.h>
+#include <proto/dos.h>
 
 /* The framebuffer frontend's CreateObject serves everything but the GPU
  * transport service, the Gallium client and Vulkan. */
@@ -30,6 +33,29 @@
  * constructor retains for itself; the display drops its own reference on
  * either outcome.
  */
+/* ENV:VirGL-Status, as virgl.hidd writes it: OpenGL renders in software
+ * and this is why. Only from a DOS process; no sprintf in a ROM module. */
+static void VirtioGfxDisplay_ReportSoftpipe(const char *why)
+{
+    struct Task *me = FindTask(NULL);
+    struct Library *DOSBase;
+    char text[128];
+    ULONG n = 0;
+    const char *c;
+
+    if (me->tc_Node.ln_Type != NT_PROCESS)
+        return;
+    for (c = "softpipe: "; *c; c++)
+        text[n++] = *c;
+    for (c = why; *c && n < sizeof(text) - 1; c++)
+        text[n++] = *c;
+    text[n] = 0;
+    if (!(DOSBase = OpenLibrary("dos.library", 36)))
+        return;
+    SetVar("VirGL-Status", text, -1, GVF_GLOBAL_ONLY | LV_VAR);
+    CloseLibrary(DOSBase);
+}
+
 static OOP_Object *VirtioGfxDisplay_CreateGalliumObject(OOP_Class *cl, struct pHidd_Display_CreateObject *msg)
 {
     struct VirtioGPU *gpu = XSD(cl)->data.present_data;
@@ -38,11 +64,17 @@ static OOP_Object *VirtioGfxDisplay_CreateGalliumObject(OOP_Class *cl, struct pH
     OOP_Object *service, *result = NULL;
     OOP_AttrBase ab;
 
-    if (!VirtioGPUHasVirGL(gpu))
+    const char *missing = VirtioGPUVirGLMissing(gpu);
+
+    if (missing) {
+        VirtioGfxDisplay_ReportSoftpipe(missing);
         return NULL;
+    }
     module = OpenLibrary((STRPTR)VIRTIOGFX_VIRGL_DRIVER, 0);
-    if (!module)
+    if (!module) {
+        VirtioGfxDisplay_ReportSoftpipe("virgl.hidd could not be opened");
         return NULL;
+    }
     ObtainSemaphore(&base->loader_lock);
     if (!base->virglmodule) {
         base->virglmodule = module;
