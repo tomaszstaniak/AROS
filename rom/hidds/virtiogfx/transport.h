@@ -11,6 +11,7 @@ struct VirtioGPUSurface { APTR pixels;ULONG width,height,stride; };
 BOOL VirtioGPUAcquire(struct VirtioGPU *);
 BOOL VirtioGPUHasVirGL(struct VirtioGPU *);
 const char *VirtioGPUVirGLMissing(struct VirtioGPU *);
+void VirtioGPUSetLimit(struct VirtioGPU *, ULONG seconds);
 APTR VirtioGPUAlloc(struct VirtioGPU *,APTR owner,ULONG bytes);
 BOOL VirtioGPUFree(struct VirtioGPU *,APTR owner,APTR pointer);
 BOOL VirtioGPUAddress(struct VirtioGPU *,APTR owner,APTR pointer,UQUAD *address);

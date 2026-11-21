@@ -151,6 +151,9 @@ struct VirtioGPU {
     unsigned pending_bytes;
     uint32_t pending_type;
     ULONG clients,next_context,next_resource,contexts,resources;
+    /* ENV:VirGL-Timeout as read for the last new VirGL client, in seconds;
+     * 0 keeps the built-in 3D limits. */
+    ULONG limit_3d_s;
 };
 /* The public Exec lock resource serializes publication with remote IRQs.
  * Never hold this lock across Signal: claiming IPI space may drain callbacks.
@@ -313,13 +316,14 @@ static BOOL gpu_held(struct VirtioGPU *gpu)
 #else
 #define gpu_held(gpu) FALSE
 #endif
-static ULONG gpu_limit(uint32_t type)
+static ULONG gpu_limit(struct VirtioGPU *gpu,uint32_t type)
 {
 #ifdef GPU_TEST_LIMIT_S
     if(type!=GPU_CMD_TRANSFER_TO_HOST_2D && type!=GPU_CMD_RESOURCE_FLUSH)return GPU_TEST_LIMIT_S;
 #endif
-    if(type==GPU_CMD_SUBMIT_3D)return GPU_WAIT_SUBMIT_S;
     if(type==GPU_CMD_TRANSFER_TO_HOST_2D || type==GPU_CMD_RESOURCE_FLUSH)return GPU_WAIT_2D_S;
+    if(gpu->limit_3d_s)return gpu->limit_3d_s;
+    if(type==GPU_CMD_SUBMIT_3D)return GPU_WAIT_SUBMIT_S;
     return GPU_WAIT_3D_S;
 }
 /* Sleeps until the device has used the chain that ends at `next`, or the
@@ -414,7 +418,7 @@ static int gpu_command(struct VirtioGPU *gpu,unsigned request_bytes,
 #endif
     /* The deadline starts after submission: a preempted producer must not
      * consume the entire device timeout before it has notified the device. */
-    gpu_wait_used(gpu,next,gpu_limit(request->type),mask);
+    gpu_wait_used(gpu,next,gpu_limit(gpu,request->type),mask);
     gpu_wait_end(gpu);
     gpu->timer_port.mp_Flags=PA_IGNORE;
     SetSignal(0,mask);FreeSignal(bit);
@@ -529,6 +533,15 @@ const char *VirtioGPUVirGLMissing(struct VirtioGPU *gpu)
         why = "host is busy with an earlier command";
     ReleaseSemaphore(&gpu->lock);
     return why;
+}
+/* One limit in seconds for every 3D command, 0 for the built-in ones. */
+void VirtioGPUSetLimit(struct VirtioGPU *gpu, ULONG seconds)
+{
+    if (!gpu)
+        return;
+    ObtainSemaphore(&gpu->lock);
+    gpu->limit_3d_s = seconds;
+    ReleaseSemaphore(&gpu->lock);
 }
 BOOL VirtioGPUHasVirGL(struct VirtioGPU *gpu)
 {
@@ -805,7 +818,7 @@ BOOL VirtioGPUCommand(struct VirtioGPU *gpu, APTR owner, const void *request, UL
         goto done;
     /* The answer to a command that was given up on belongs to its caller,
      * who has left; whatever it says, this command may go once it is in. */
-    if (gpu->pending && !gpu_settle(gpu, gpu_limit(((const struct GPUHeader *)request)->type)))
+    if (gpu->pending && !gpu_settle(gpu, gpu_limit(gpu, ((const struct GPUHeader *)request)->type)))
         goto done;
     CopyMem(request, gpu->message, bytes);
     const UBYTE *m = gpu->message;
