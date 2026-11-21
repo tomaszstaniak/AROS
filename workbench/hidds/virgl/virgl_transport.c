@@ -8,6 +8,7 @@
 #include "virgl_native.h"
 #include "virgl_stats.h"
 static OOP_MethodID method(ULONG i){return OOP_GetMethodID(IID_Hidd_VirtioGPU,i);}
+struct avgl_activity avgl_activity;
 void avgl_manager_init(struct avgl_manager *m,struct Library *u)
 {
     InitSemaphore(&m->mutex);
@@ -29,9 +30,21 @@ static BOOL command(struct avgl_transport *s,const void *p,ULONG n,ULONG type,UL
 {
     struct pHidd_VirtioGPU_Command msg={method(moHidd_VirtioGPU_Command),p,n,out,size,type};
     UQUAD t=avgl_stat_now();
-    BOOL ok=s->service && OOP_DoMethod(s->service,(OOP_Msg)&msg);
+    BOOL ok;
+    if(!s->service)return FALSE;
+    __atomic_fetch_add(&avgl_activity.running,1,__ATOMIC_RELAXED);
+    ok=OOP_DoMethod(s->service,(OOP_Msg)&msg);
+    __atomic_fetch_add(&avgl_activity.finished,1,__ATOMIC_RELAXED);
+    __atomic_fetch_sub(&avgl_activity.running,1,__ATOMIC_RELAXED);
+    /* The watcher said that the host is slow; this is the answer. */
+    if(ok && avgl_activity.told){avgl_activity.told=FALSE;avgl_report("virgl");}
     avgl_stat_add(AVGL_ST_COMMAND,t,n);
     return ok;
+}
+BOOL avgl_busy(struct avgl_transport *s)
+{
+    struct pHidd_VirtioGPU_Healthy msg={method(moHidd_VirtioGPU_Healthy)};
+    return s->service && !OOP_DoMethod(s->service,(OOP_Msg)&msg);
 }
 BOOL avgl_command(struct avgl_transport *s,const void *p,ULONG n,ULONG type,ULONG min,ULONG *got,BOOL fenced)
 {
@@ -43,6 +56,10 @@ BOOL avgl_command(struct avgl_transport *s,const void *p,ULONG n,ULONG type,ULON
     if(ok){
         *got=sizeof(reply);
         if(((const struct gpu_header*)p)->type==GPU_RESOURCE_CREATE_3D)s->resources_live++;
+    }else if(avgl_busy(s)){
+        /* Not a refusal: the host did not answer within the limit. */
+        avgl_activity.gave_up=TRUE;
+        avgl_report("virgl: stopped, the host did not answer");
     }
     return ok;
 }
@@ -85,6 +102,17 @@ void avgl_backing_end(struct avgl_transport *s,APTR p)
     struct pHidd_VirtioGPU_BackingEnd msg={method(moHidd_VirtioGPU_BackingEnd),p};
     if(s->service)OOP_DoMethod(s->service,(OOP_Msg)&msg);
 }
+/* The manager lives in the driver object. A transport that outlives the
+ * object, to be closed later by the cleanup process, must leave it first. */
+void avgl_leave_manager(struct avgl_transport *s)
+{
+    struct avgl_manager *m=s->manager;
+    if(!m)return;
+    s->manager=NULL;
+    ObtainSemaphore(&m->mutex);
+    m->references--;
+    ReleaseSemaphore(&m->mutex);
+}
 BOOL avgl_close(struct avgl_transport *s)
 {
     if(!s->service)return TRUE;
@@ -101,9 +129,7 @@ BOOL avgl_close(struct avgl_transport *s)
     OOP_DoMethod(s->service,(OOP_Msg)&msg);
     s->service=NULL;
     s->context_created=FALSE;
-    ObtainSemaphore(&s->manager->mutex);
-    s->manager->references--;
-    ReleaseSemaphore(&s->manager->mutex);
+    avgl_leave_manager(s);
     return !s->failed;
 }
 BOOL avgl_open(struct avgl_transport *s,struct avgl_manager *m)

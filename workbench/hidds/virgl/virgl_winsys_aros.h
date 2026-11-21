@@ -6,8 +6,10 @@
 #include "util/format/u_formats.h"
 #include "virgl/virgl_winsys.h"
 struct avgl_manager;
+struct avgl_registry;
 struct virgl_winsys *avgl_winsys_create(struct virgl_winsys **owner_slot,
-    const struct GalliumScreenFactory *factory, struct avgl_manager *manager);
+    const struct GalliumScreenFactory *factory, struct avgl_manager *manager,
+    struct avgl_registry *registry);
 void avgl_winsys_dispose(struct virgl_winsys *ws);
 bool avgl_read_resource(struct virgl_winsys *ws, struct virgl_hw_res *res,
     unsigned width, unsigned height, unsigned stride);

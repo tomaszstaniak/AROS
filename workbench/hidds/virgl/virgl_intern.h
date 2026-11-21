@@ -7,6 +7,7 @@
 #include <exec/semaphores.h>
 #include <gallium/screenfactory.h>
 #include "virgl_transport.h"
+#include "virgl_registry.h"
 #include <oop/oop.h>
 #include <hidd/gallium.h>
 #include LC_LIBDEFS_FILE
@@ -22,6 +23,7 @@ struct HiddGalliumVirglData {
 };
 struct virglstaticdata {
     struct avgl_manager manager;
+    struct avgl_registry registry;
     OOP_Class *galliumclass;
     OOP_AttrBase hiddGalliumAB;
     struct Library *CyberGfxBase, *UtilityBase;
