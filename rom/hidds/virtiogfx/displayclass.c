@@ -56,6 +56,27 @@ static void VirtioGfxDisplay_ReportSoftpipe(const char *why)
     CloseLibrary(DOSBase);
 }
 
+/* ENV:VirGL-Timeout: the wait for each 3D command in milliseconds, instead
+ * of the built-in limits, for hosts slower than expected. The device waits
+ * in whole seconds, so the value is rounded up. Read for each new client. */
+static ULONG VirtioGfxDisplay_ReadLimit(void)
+{
+    struct Task *me = FindTask(NULL);
+    struct Library *DOSBase;
+    char text[16];
+    ULONG ms = 0, i;
+
+    if (me->tc_Node.ln_Type != NT_PROCESS)
+        return 0;
+    if (!(DOSBase = OpenLibrary("dos.library", 36)))
+        return 0;
+    if (GetVar("VirGL-Timeout", text, sizeof(text), GVF_GLOBAL_ONLY | LV_VAR) > 0)
+        for (i = 0; text[i] >= '0' && text[i] <= '9' && ms < 100000000; i++)
+            ms = ms * 10 + (text[i] - '0');
+    CloseLibrary(DOSBase);
+    return (ms + 999) / 1000;
+}
+
 static OOP_Object *VirtioGfxDisplay_CreateGalliumObject(OOP_Class *cl, struct pHidd_Display_CreateObject *msg)
 {
     struct VirtioGPU *gpu = XSD(cl)->data.present_data;
@@ -70,6 +91,7 @@ static OOP_Object *VirtioGfxDisplay_CreateGalliumObject(OOP_Class *cl, struct pH
         VirtioGfxDisplay_ReportSoftpipe(missing);
         return NULL;
     }
+    VirtioGPUSetLimit(gpu, VirtioGfxDisplay_ReadLimit());
     module = OpenLibrary((STRPTR)VIRTIOGFX_VIRGL_DRIVER, 0);
     if (!module) {
         VirtioGfxDisplay_ReportSoftpipe("virgl.hidd could not be opened");
