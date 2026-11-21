@@ -8,6 +8,7 @@ static int HiddVirgl_InitLib(LIBBASETYPEPTR LIBBASE)
 {
     LIBBASE->sd.UtilityBase=OpenLibrary("utility.library",0);
     avgl_manager_init(&LIBBASE->sd.manager,LIBBASE->sd.UtilityBase);
+    avgl_registry_init(&LIBBASE->sd.registry);
     LIBBASE->sd.CyberGfxBase=OpenLibrary("cybergraphics.library",0);
     LIBBASE->sd.hiddGalliumAB=OOP_ObtainAttrBase(IID_Hidd_Gallium);
     if(LIBBASE->sd.UtilityBase && LIBBASE->sd.CyberGfxBase && LIBBASE->sd.hiddGalliumAB)return TRUE;
@@ -18,7 +19,7 @@ static int HiddVirgl_InitLib(LIBBASETYPEPTR LIBBASE)
 }
 static int HiddVirgl_ExpungeGuard(LIBBASETYPEPTR LIBBASE)
 {
-    return avgl_manager_can_expunge(&LIBBASE->sd.manager);
+    return avgl_manager_can_expunge(&LIBBASE->sd.manager) && !LIBBASE->sd.registry.watcher;
 }
 static int HiddVirgl_ExpungeLib(LIBBASETYPEPTR LIBBASE)
 {

@@ -3,6 +3,11 @@
  * No DRM descriptor, native sync-fd, blob memory or external resource import.
  */
 #include <exec/semaphores.h>
+#include <exec/tasks.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h>
+#include <dos/dostags.h>
+#include <proto/dos.h>
 #include <proto/exec.h>
 #include <aros/debug.h>
 
@@ -12,6 +17,7 @@
 #include "virgl_winsys_aros.h"
 #include "virgl_transport.h"
 #include "virgl_native.h"
+#include "virgl_registry.h"
 #include "virgl_stats.h"
 
 struct avgl_ws;
@@ -20,6 +26,12 @@ struct virgl_hw_res {
     struct avgl_ws *ws;
     uint32_t id, size, refs, pending;
     void *map;
+    /* Already released on the host for an ended program. */
+    bool gone;
+    /* Plain memory with nothing on the host: made after this program's
+     * OpenGL stopped, so that Mesa goes on without a picture. Mesa treats a
+     * failed allocation as fatal and ends the program. */
+    bool local;
 };
 struct pipe_fence_handle { unsigned refs; };
 struct avgl_cb {
@@ -35,8 +47,33 @@ struct avgl_ws {
     struct SignalSemaphore mutex;
     struct virgl_hw_res *resources;
     struct virgl_winsys **owner_slot;
+    struct avgl_registry *registry;
+    struct avgl_ws *next;
+    /* The task that last used this winsys, and its unique ID: a task
+     * address alone can be given to a new task. */
+    struct Task *user;
+    ULONG user_id;
+    /* Segment list of the Shell command that used it, or 0. */
+    BPTR user_module;
+    bool released;
+    /* Disposed of while the card did not answer; finished later. */
+    bool abandoned;
 };
 static struct avgl_ws *ws_cast(struct virgl_winsys *ws) { return (struct avgl_ws *)ws; }
+/* The command a Shell process is running now; 0 for any other task. */
+static BPTR command_of(struct Task *task)
+{
+    struct CommandLineInterface *cli;
+    if(task->tc_Node.ln_Type!=NT_PROCESS)return 0;
+    cli=BADDR(((struct Process *)task)->pr_CLI);
+    return cli?cli->cli_Module:0;
+}
+static void used_now(struct avgl_ws *ws)
+{
+    struct Task *me=FindTask(NULL);
+    if(ws->user!=me){ws->user=me;ws->user_id=GetETaskID(me);ws->user_module=command_of(me);}
+}
+
 static int ws_fd(struct virgl_winsys *ws) { (void)ws; return -1; }
 static bool send_request(struct avgl_ws *ws, const void *req, ULONG size, bool fence)
 {
@@ -66,7 +103,13 @@ static void resource_ref_raw(struct avgl_ws *ws,struct virgl_hw_res **dst,struct
     *dst=src;
     if (old && --old->refs==0) {
         struct virgl_hw_res **link=&ws->resources;
-        if(cleanup_resource(ws,old->id,true,true,true))avgl_free(&ws->transport,old->map);
+        if(old->local)FreeVec(old->map);
+        else if(!old->gone){
+            /* The card does not answer now: nothing can be released on the
+             * host. The resource stays listed and goes with the winsys. */
+            if(avgl_busy(&ws->transport))return;
+            if(cleanup_resource(ws,old->id,true,true,true))avgl_free(&ws->transport,old->map);
+        }
         while (*link && *link!=old) link=&(*link)->next;
         if (*link) *link=old->next;
         FreeVec(old);
@@ -95,7 +138,17 @@ static struct virgl_hw_res *ws_resource_create(struct virgl_winsys *vws,
     UQUAD t0=avgl_stat_now();
     (void)front;
     ObtainSemaphore(&ws->mutex);
-    if (!avgl_healthy(&ws->transport) || !size) goto done;
+    used_now(ws);
+    if (!size) goto done;
+    if (!avgl_healthy(&ws->transport)) {
+        res=avgl_native_alloc(sizeof(*res));
+        if (!res) goto done;
+        res->map=avgl_native_alloc(size);
+        if (!res->map) {FreeVec(res);res=NULL;goto done;}
+        res->ws=ws;res->refs=1;res->size=size;res->gone=true;res->local=true;
+        res->next=ws->resources;ws->resources=res;
+        goto done;
+    }
     res=avgl_native_alloc(sizeof(*res));
     if (!res) goto done;
     res->ws=ws;res->id=avgl_resource_id(&ws->transport);res->refs=1;res->size=size;
@@ -134,7 +187,7 @@ static int ws_transfer(struct virgl_winsys *vws,struct virgl_hw_res *res,
     bool ok=false;
     UQUAD t0=avgl_stat_now();
     ObtainSemaphore(&ws->mutex);
-    if (offset>=res->size || box->x<0 || box->y<0 || box->z<0 ||
+    if (ws->released || res->gone || offset>=res->size || box->x<0 || box->y<0 || box->z<0 ||
         box->width<=0 || box->height<=0 || box->depth<=0) goto done;
     if (!avgl_backing_begin(&ws->transport,res->map,flags)) goto done;
     ok=send_request(ws,&req,sizeof(req),true);
@@ -154,7 +207,7 @@ static int ws_get(struct virgl_winsys *ws,struct virgl_hw_res *r,const struct pi
     uint32_t stride,uint32_t layer,uint32_t off,uint32_t level)
 { return ws_transfer(ws,r,b,stride,layer,off,level,false); }
 static void *ws_map(struct virgl_winsys *ws,struct virgl_hw_res *res)
-{ return avgl_healthy(&ws_cast(ws)->transport)?res->map:NULL; }
+{ (void)ws;return res->map; /* stays valid after a failure; Mesa does not check for NULL */ }
 static void ws_wait(struct virgl_winsys *ws,struct virgl_hw_res *res)
 { (void)ws;(void)res; /* Every submitted batch already waited for its GPU fence. */ }
 static bool ws_busy(struct virgl_winsys *ws,struct virgl_hw_res *res)
@@ -233,6 +286,7 @@ static int ws_submit(struct virgl_winsys *vws,struct virgl_cmd_buf *base,struct 
     bool ok;
     UQUAD t0=avgl_stat_now();ULONG words=base->cdw;
     ObtainSemaphore(&ws->mutex);
+    used_now(ws);
     ok=avgl_healthy(&ws->transport);
     if(fence)*fence=NULL;
     if(base->cdw>cb->capacity)ok=false;
@@ -284,15 +338,165 @@ static void ws_fence_sync(struct virgl_winsys *ws,struct virgl_cmd_buf *cb,struc
 static void ws_front(struct virgl_winsys *ws,struct virgl_cmd_buf *cb,struct virgl_hw_res *res,
     unsigned level,unsigned layer,void *handle,struct pipe_box *box)
 { (void)ws;(void)cb;(void)res;(void)level;(void)layer;(void)handle;(void)box; /* HIDD presents readback. */ }
+void avgl_registry_init(struct avgl_registry *r)
+{
+    InitSemaphore(&r->lock);r->first=NULL;r->watcher=NULL;r->seen=r->same=0;r->contexts=r->resources=0;r->bytes=0;
+}
+static void registry_remove(struct avgl_ws *ws)
+{
+    struct avgl_ws **link=&ws->registry->first;
+    while(*link && *link!=ws)link=&(*link)->next;
+    if(*link)*link=ws->next;
+    ws->next=NULL;
+}
+/* Has the program that last used this winsys ended? Either its task is
+ * gone (the address may belong to a new task by now, so it is looked up by
+ * its unique ID), or the task is a Shell that has finished the command: the
+ * Shell runs a command in its own process, and holds the command's segment
+ * list in cli_Module only while the command runs. A task that is moving
+ * between two of exec's lists is not found, so it is looked up three times. */
+static bool user_ended(struct avgl_ws *ws)
+{
+    struct Task *task=NULL;
+    bool ended;
+    int i;
+    if(!ws->user_id)return false;
+    for(i=0;i<3 && task!=ws->user;i++)task=FindTaskByPID(ws->user_id);
+    if(task!=ws->user)return true;
+    if(!ws->user_module)return false;
+    Forbid();
+    ended=command_of(task)!=ws->user_module;
+    Permit();
+    return ended;
+}
+/* ENV:VirGL-Released counts what the driver released on the host for
+ * programs that ended without closing OpenGL. Only a process can write it. */
+static void publish(struct avgl_registry *r)
+{
+    static const char *const names[3]={"contexts=","resources=","kilobytes="};
+    struct Library *DOSBase;
+    char text[96];
+    ULONG n=0,v[3],k,d;
+    if(FindTask(NULL)->tc_Node.ln_Type!=NT_PROCESS)return;
+    v[0]=r->contexts;v[1]=r->resources;v[2]=(ULONG)(r->bytes/1024);
+    for(k=0;k<3;k++){
+        const char *name=names[k];char digits[12];
+        if(k)text[n++]=' ';
+        while(*name)text[n++]=*name++;
+        d=0;do{digits[d++]='0'+v[k]%10;v[k]/=10;}while(v[k]);
+        while(d)text[n++]=digits[--d];
+    }
+    text[n]=0;
+    DOSBase=OpenLibrary((STRPTR)"dos.library",36);
+    if(!DOSBase)return;
+    SetVar((STRPTR)"VirGL-Released",(STRPTR)text,-1,GVF_GLOBAL_ONLY|LV_VAR);
+    CloseLibrary(DOSBase);
+}
+/* Releases on the host everything that belongs to winsys objects whose
+ * program has ended: resources with their backing memory, then the context.
+ * Such an object itself stays: Mesa's structures of that program still point
+ * at it, and a later call from there must find it and fail cleanly.
+ * Also finishes objects that were disposed of while the card did not answer
+ * (abandoned); nothing points at those, so they are freed.
+ * Called with no winsys lock held. */
+static void release_ended(struct avgl_registry *registry)
+{
+    struct avgl_ws **link,*ws;
+    bool any=false;
+    ObtainSemaphore(&registry->lock);
+    link=&registry->first;
+    while((ws=*link)){
+        ULONG count=0,context;UQUAD bytes=0;struct virgl_hw_res *r;
+        if(!(ws->abandoned || user_ended(ws)) || avgl_busy(&ws->transport) ||
+           !AttemptSemaphore(&ws->mutex)){link=&ws->next;continue;}
+        context=ws->transport.context;
+        for(r=ws->resources;r;r=r->next){
+            if(r->gone)continue; /* local ones too: their memory may be in use */
+            if(cleanup_resource(ws,r->id,true,true,true))avgl_free(&ws->transport,r->map);
+            r->map=NULL;r->gone=true;count++;bytes+=r->size;
+        }
+        avgl_close(&ws->transport);
+        ws->transport.failed=TRUE;ws->released=true;
+        *link=ws->next;ws->next=NULL;
+        ReleaseSemaphore(&ws->mutex);
+        if(ws->abandoned){
+            while(ws->resources){r=ws->resources;ws->resources=r->next;if(r->local)FreeVec(r->map);FreeVec(r);}
+            FreeVec(ws);
+        }else{
+            registry->contexts++;registry->resources+=count;registry->bytes+=bytes;any=true;
+        }
+        bug("[virgl] released context %lu left behind: %lu resources, %lu KB\n",
+            (unsigned long)context,(unsigned long)count,(unsigned long)(bytes/1024));
+    }
+    if(any)publish(registry);
+    ReleaseSemaphore(&registry->lock);
+}
+/* Looks once a second for programs that have ended, so that the host gets
+ * its memory back soon and a command started again from the same Shell is
+ * not taken for the one that ended. Once started it stays: the module is
+ * not unloaded while the display driver runs, and a process that ended when
+ * the last winsys closed took the system down on mainline of 2026-11-15
+ * (allocator free-list damage right after it had gone). */
+static void watcher(void)
+{
+    struct avgl_registry *registry=FindTask(NULL)->tc_UserData;
+    struct Library *DOSBase=OpenLibrary((STRPTR)"dos.library",36);
+    for(;;){
+        ULONG done;
+        if(DOSBase)Delay(50);
+        /* A command that has been with the host for three looks in a row:
+         * say so, and say when it is over. */
+        done=avgl_activity.finished;
+        if(avgl_activity.running && done==registry->seen){
+            if(++registry->same==3){avgl_activity.told=TRUE;avgl_report("virgl: waiting for the host (more than 3 s)");}
+        }else{
+            registry->same=0;registry->seen=done;
+        }
+        release_ended(registry);
+        if(!DOSBase)break;
+    }
+    if(DOSBase)CloseLibrary(DOSBase);
+}
+/* Called with the registry locked. Only a process can start a process. */
+static void start_watcher(struct avgl_registry *registry)
+{
+    struct Library *DOSBase;
+    if(registry->watcher || FindTask(NULL)->tc_Node.ln_Type!=NT_PROCESS)return;
+    DOSBase=OpenLibrary((STRPTR)"dos.library",36);
+    if(!DOSBase)return;
+    registry->watcher=(struct Task *)CreateNewProcTags(NP_Entry,(IPTR)watcher,
+        NP_Name,(IPTR)"virgl.hidd cleanup",NP_UserData,(IPTR)registry,
+        NP_Priority,0,NP_StackSize,65536,NP_Input,0,NP_Output,0,NP_Error,0,
+        NP_CloseInput,FALSE,NP_CloseOutput,FALSE,NP_CloseError,FALSE,
+        NP_CurrentDir,0,NP_HomeDir,0,NP_CopyVars,FALSE,NP_WindowPtr,-1,TAG_DONE);
+    CloseLibrary(DOSBase);
+}
 void avgl_winsys_dispose(struct virgl_winsys *vws)
 {
     struct avgl_ws *ws=ws_cast(vws);
     if(!ws)return;
     avgl_stat_report("context ends");
+    /* Leave the registry first: release_ended holds its lock while it works
+     * on a winsys, so after this nothing else touches this one. */
+    ObtainSemaphore(&ws->registry->lock);
+    if(!ws->released && avgl_busy(&ws->transport)){
+        /* Nothing can be released on the host now. Keep the object for the
+         * watcher, which finishes it once the card answers again. */
+        ws->abandoned=true;
+        avgl_leave_manager(&ws->transport);
+        if(ws->owner_slot)*ws->owner_slot=NULL;
+        ws->owner_slot=NULL;
+        start_watcher(ws->registry);
+        ReleaseSemaphore(&ws->registry->lock);
+        return;
+    }
+    registry_remove(ws);
+    ReleaseSemaphore(&ws->registry->lock);
     ObtainSemaphore(&ws->mutex);
     while(ws->resources){
         struct virgl_hw_res *r=ws->resources;ws->resources=r->next;
-        if(cleanup_resource(ws,r->id,true,true,true))avgl_free(&ws->transport,r->map);
+        if(r->local)FreeVec(r->map);
+        else if(!r->gone && cleanup_resource(ws,r->id,true,true,true))avgl_free(&ws->transport,r->map);
         FreeVec(r);
     }
     avgl_close(&ws->transport);
@@ -300,12 +504,21 @@ void avgl_winsys_dispose(struct virgl_winsys *vws)
     ReleaseSemaphore(&ws->mutex);FreeVec(ws);
 }
 struct virgl_winsys *avgl_winsys_create(struct virgl_winsys **owner_slot,
-    const struct GalliumScreenFactory *factory, struct avgl_manager *manager)
+    const struct GalliumScreenFactory *factory, struct avgl_manager *manager,
+    struct avgl_registry *registry)
 {
-    struct avgl_ws *ws=avgl_native_alloc(sizeof(*ws));
+    struct avgl_ws *ws;
+    release_ended(registry);
+    ws=avgl_native_alloc(sizeof(*ws));
     if(!ws)return NULL;
     InitSemaphore(&ws->mutex);ws->owner_slot=owner_slot;ws->factory=*factory;
     if(!avgl_open(&ws->transport,manager)){FreeVec(ws);return NULL;}
+    ws->registry=registry;
+    used_now(ws);
+    ObtainSemaphore(&registry->lock);
+    ws->next=registry->first;registry->first=ws;
+    start_watcher(registry);
+    ReleaseSemaphore(&registry->lock);
     ws->base.destroy=avgl_winsys_dispose;ws->base.get_fd=ws_fd;
     ws->base.transfer_put=ws_put;ws->base.transfer_get=ws_get;
     ws->base.resource_create=ws_resource_create;ws->base.resource_reference=ws_resource_reference;

@@ -6,6 +6,9 @@
 #include <proto/graphics.h>
 #include <proto/cybergraphics.h>
 #include <cybergraphx/cybergraphics.h>
+#include <proto/dos.h>
+#include <dos/var.h>
+#include <exec/tasks.h>
 #include <hidd/gallium.h>
 #include <gallium/gallium.h>
 #include "pipe/p_screen.h"
@@ -18,6 +21,19 @@
 #define UtilityBase (SD(cl)->UtilityBase)
 #undef HiddGalliumAttrBase
 #define HiddGalliumAttrBase (SD(cl)->hiddGalliumAB)
+/* ENV:VirGL-Status tells the user what the renderer is doing: "virgl", or
+ * "virgl: ..." when the host is slow or has stopped answering. Only written
+ * from a DOS process. */
+void avgl_report(const char *status)
+{
+    struct Task *me=FindTask(NULL);
+    struct Library *DOSBase;
+    if(me->tc_Node.ln_Type!=NT_PROCESS)return;
+    DOSBase=OpenLibrary("dos.library",36);
+    if(!DOSBase)return;
+    SetVar("VirGL-Status",status,-1,GVF_GLOBAL_ONLY|LV_VAR);
+    CloseLibrary(DOSBase);
+}
 OOP_Object *METHOD(HiddVirgl,Root,New)
 {
     if(GetTagData(aHidd_Gallium_InterfaceVersion,-1,msg->attrList)!=GALLIUM_INTERFACE_VERSION)return NULL;
@@ -75,12 +91,13 @@ APTR METHOD(HiddVirgl,Hidd_Gallium,CreatePipeScreen)
     struct pipe_screen *screen=NULL;
     ObtainSemaphore(&d->screen_lock);
     if(!d->winsys && !d->screen && d->factory.module){
-        d->winsys=avgl_winsys_create(&d->winsys,&d->factory,&d->manager);
+        d->winsys=avgl_winsys_create(&d->winsys,&d->factory,&d->manager,&SD(cl)->registry);
         if(d->winsys){
             d->screen=d->factory.create(d->factory.module,GALLIUM_SCREEN_BACKEND_VIRGL,d->winsys);
             /* A failed core constructor may already consume the winsys;
              * its native destroy clears this owner slot. */
             if(!d->screen && d->winsys)avgl_winsys_dispose(d->winsys);
+            if(d->screen){avgl_activity.gave_up=FALSE;avgl_report("virgl");}
         }
     }
     screen=d->screen;

@@ -141,6 +141,12 @@ struct VirtioGPU {
 #endif
     BOOL irq_reported;
     BOOL pending,repaint;
+    /* Test aid, compiled in only with GPU_TEST_HOLD_S: the answer to one
+     * drawing command per context is ignored for that many seconds (with
+     * GPU_TEST_HOLD_ONCE: of the first context only). hold_until is the
+     * system time in seconds at which the answer may be seen. */
+    ULONG hold_until;
+    BOOL hold_armed,hold_used;
     UWORD pending_next;
     unsigned pending_bytes;
     uint32_t pending_type;
@@ -277,11 +283,68 @@ static void gpu_owned_complete(struct VirtioGPU *gpu, int success)
  * it, in submission order. A fenced one is answered only when its fence is
  * polled, every 10 ms, which made each command cost about 10 ms. */
 #define GPU_FENCE_COMMANDS 0
+/* How long the host may take over one command before the caller gives up.
+ * A drawing command can make the host compile shaders, which takes seconds
+ * on a slow machine. Giving up ends the calling program's OpenGL, so the 3D
+ * limits are generous. The desktop's own 2D updates keep a short limit: a
+ * missed one is repeated by the next update. */
+#define GPU_WAIT_SUBMIT_S 120
+#define GPU_WAIT_3D_S 30
+#define GPU_WAIT_2D_S 1
+#ifndef GPU_TEST_HOLD_S
+#define GPU_TEST_HOLD_S 0
+#endif
+#if GPU_TEST_HOLD_S
+#include <proto/timer.h>
+static ULONG gpu_seconds(struct VirtioGPU *gpu)
+{
+    struct Device *TimerBase=gpu->timer->tr_node.io_Device;
+    struct timeval now;
+    GetSysTime(&now);
+    return now.tv_secs;
+}
+static BOOL gpu_held(struct VirtioGPU *gpu)
+{
+    if(!gpu->hold_until)return FALSE;
+    if(gpu_seconds(gpu)<gpu->hold_until)return TRUE;
+    gpu->hold_until=0;
+    return FALSE;
+}
+#else
+#define gpu_held(gpu) FALSE
+#endif
+static ULONG gpu_limit(uint32_t type)
+{
+#ifdef GPU_TEST_LIMIT_S
+    if(type!=GPU_CMD_TRANSFER_TO_HOST_2D && type!=GPU_CMD_RESOURCE_FLUSH)return GPU_TEST_LIMIT_S;
+#endif
+    if(type==GPU_CMD_SUBMIT_3D)return GPU_WAIT_SUBMIT_S;
+    if(type==GPU_CMD_TRANSFER_TO_HOST_2D || type==GPU_CMD_RESOURCE_FLUSH)return GPU_WAIT_2D_S;
+    return GPU_WAIT_3D_S;
+}
+/* Sleeps until the device has used the chain that ends at `next`, or the
+ * limit passes. The interrupt is a hint; the timer wakes the loop once a
+ * second. The caller owns the signal bit and has registered as the waiter. */
+static BOOL gpu_wait_used(struct VirtioGPU *gpu,UWORD next,ULONG seconds,ULONG mask)
+{
+    struct virtio_queue *q=gpu->device.dev_VQ;
+    while((gpu_held(gpu) || q->q_Used->idx!=next) && seconds--) {
+        BOOL held=gpu_held(gpu);
+        gpu->timer->tr_node.io_Command=TR_ADDREQUEST;
+        gpu->timer->tr_time.tv_secs=1;gpu->timer->tr_time.tv_micro=0;
+        SendIO((struct IORequest *)gpu->timer);
+        while(!CheckIO((struct IORequest *)gpu->timer) && (held || q->q_Used->idx!=next))
+            Wait(mask);
+        if(!CheckIO((struct IORequest *)gpu->timer))AbortIO((struct IORequest *)gpu->timer);
+        WaitIO((struct IORequest *)gpu->timer);
+    }
+    return !gpu_held(gpu) && q->q_Used->idx==next;
+}
 static int gpu_reap(struct VirtioGPU *gpu)
 {
     struct virtio_queue *q=gpu->device.dev_VQ;
     UWORD used=q->q_Used->idx;
-    if(used!=gpu->pending_next)return 0;
+    if(used!=gpu->pending_next || gpu_held(gpu))return 0;
     gpu_barrier();
     unsigned slot=(UWORD)(gpu->pending_next-1)%8;
     uint32_t id=q->q_Used->ring[slot].id,len=q->q_Used->ring[slot].len;
@@ -341,24 +404,25 @@ static int gpu_command(struct VirtioGPU *gpu,unsigned request_bytes,
     q->q_Avail->ring[(UWORD)(next-1)%8]=0;gpu_barrier();
     q->q_Avail->idx=next;gpu_barrier();
     *q->q_Notify=0;gpu_barrier();
-    /* Start the deadline after submission: a preempted producer must not
+#if GPU_TEST_HOLD_S
+#ifdef GPU_TEST_HOLD_ONCE
+    if(request->type==GPU_CMD_CTX_CREATE && !gpu->hold_used){gpu->hold_used=TRUE;gpu->hold_armed=TRUE;}
+#else
+    if(request->type==GPU_CMD_CTX_CREATE)gpu->hold_armed=TRUE;
+#endif
+    if(request->type==GPU_CMD_SUBMIT_3D && gpu->hold_armed){gpu->hold_armed=FALSE;gpu->hold_until=gpu_seconds(gpu)+GPU_TEST_HOLD_S;}
+#endif
+    /* The deadline starts after submission: a preempted producer must not
      * consume the entire device timeout before it has notified the device. */
-    gpu->timer->tr_node.io_Command=TR_ADDREQUEST;
-    gpu->timer->tr_time.tv_secs=1;gpu->timer->tr_time.tv_micro=0;
-    SendIO((struct IORequest *)gpu->timer);
-    while(!CheckIO((struct IORequest *)gpu->timer) &&
-          q->q_Used->idx!=next)
-        Wait(mask);
+    gpu_wait_used(gpu,next,gpu_limit(request->type),mask);
     gpu_wait_end(gpu);
-    if(!CheckIO((struct IORequest *)gpu->timer))AbortIO((struct IORequest *)gpu->timer);
-    WaitIO((struct IORequest *)gpu->timer);
     gpu->timer_port.mp_Flags=PA_IGNORE;
     SetSignal(0,mask);FreeSignal(bit);
     int result=gpu_reap(gpu);
     if(!result) {
-        /* Keep the one in-flight chain and all its DMA storage. A later
-         * present may reap it, but must not overwrite it before completion. */
-        bug("[VirtioGfx] completion delayed; retaining command fence=%lu\n",(unsigned long)gpu->fence);
+        /* Keep the one in-flight chain and all its DMA storage. The next
+         * command waits for its answer, and must not overwrite it before. */
+        bug("[VirtioGfx] command 0x%lx not answered in time; it stays published\n",(unsigned long)request->type);
     }
     else if(result>0 && !gpu->irq_reported &&
             __atomic_load_n(&gpu->interrupts,__ATOMIC_RELAXED)!=before) {
@@ -368,6 +432,28 @@ static int gpu_command(struct VirtioGPU *gpu,unsigned request_bytes,
     return result>0;
 }
 
+/* A command that an earlier caller gave up on is still with the device.
+ * Waits for its answer and applies it. TRUE: the queue is free again. */
+static BOOL gpu_settle(struct VirtioGPU *gpu,ULONG seconds)
+{
+    int result=gpu_reap(gpu);
+    if(!result) {
+        BYTE bit=AllocSignal(-1);
+        if(bit<0)return FALSE;
+        ULONG mask=1UL<<bit;
+        SetSignal(0,mask);
+        gpu->timer_port.mp_SigTask=FindTask(NULL);
+        gpu->timer_port.mp_SigBit=bit;gpu->timer_port.mp_Flags=PA_SIGNAL;
+        gpu_wait_begin(gpu,mask);
+        gpu_wait_used(gpu,gpu->pending_next,seconds,mask);
+        gpu_wait_end(gpu);
+        gpu->timer_port.mp_Flags=PA_IGNORE;
+        SetSignal(0,mask);FreeSignal(bit);
+        result=gpu_reap(gpu);
+        if(result)bug("[VirtioGfx] late answer taken; the device works again\n");
+    }
+    return !gpu->pending && !gpu->failed;
+}
 static uint32_t *gpu_request(struct VirtioGPU *gpu,uint32_t type)
 {
     memset(gpu->message,0,64);
@@ -416,6 +502,9 @@ BOOL VirtioGPUAcquire(struct VirtioGPU *gpu)
     if (!gpu)
         return FALSE;
     ObtainSemaphore(&gpu->lock);
+    /* A command that was given up on may have been answered since. */
+    if (gpu->pending)
+        gpu_reap(gpu);
     if (gpu->ready && !gpu->failed && !gpu->pending && gpu->clients != ~(ULONG)0) {
         gpu->clients++;
         okay = TRUE;
@@ -429,6 +518,8 @@ BOOL VirtioGPUHasVirGL(struct VirtioGPU *gpu)
     if (!gpu)
         return FALSE;
     ObtainSemaphore(&gpu->lock);
+    if (gpu->pending)
+        gpu_reap(gpu);
     okay = gpu->ready && !gpu->failed && !gpu->pending && (gpu->device.dev_Features & 1);
     ReleaseSemaphore(&gpu->lock);
     return okay;
@@ -702,7 +793,9 @@ BOOL VirtioGPUCommand(struct VirtioGPU *gpu, APTR owner, const void *request, UL
     ObtainSemaphore(&gpu->lock);
     if (!gpu->ready || gpu->failed)
         goto done;
-    if (gpu->pending && gpu_reap(gpu) <= 0)
+    /* The answer to a command that was given up on belongs to its caller,
+     * who has left; whatever it says, this command may go once it is in. */
+    if (gpu->pending && !gpu_settle(gpu, gpu_limit(((const struct GPUHeader *)request)->type)))
         goto done;
     CopyMem(request, gpu->message, bytes);
     const UBYTE *m = gpu->message;

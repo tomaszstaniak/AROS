@@ -27,6 +27,14 @@ struct avgl_transport {
 void avgl_manager_init(struct avgl_manager *m, struct Library *utility_base);
 BOOL avgl_manager_can_expunge(struct avgl_manager *m);
 BOOL avgl_healthy(struct avgl_transport *s);
+/* The device cannot take a command now: one that was given up on is still
+ * with the host, or the device has failed. */
+BOOL avgl_busy(struct avgl_transport *s);
+/* Commands of all clients, for the watcher that reports a slow host. */
+struct avgl_activity { volatile ULONG running, finished; volatile BOOL gave_up, told; };
+extern struct avgl_activity avgl_activity;
+/* ENV:VirGL-Status. Only written from a DOS process. */
+void avgl_report(const char *status);
 ULONG avgl_resource_id(struct avgl_transport *s);
 BOOL avgl_cleanup_command(struct avgl_transport *s, const void *input, ULONG bytes);
 
@@ -34,6 +42,7 @@ BOOL avgl_cleanup_command(struct avgl_transport *s, const void *input, ULONG byt
 
 BOOL avgl_open(struct avgl_transport *s, struct avgl_manager *manager);
 BOOL avgl_close(struct avgl_transport *s);
+void avgl_leave_manager(struct avgl_transport *s);
 BOOL avgl_command(struct avgl_transport *s, const void *input, ULONG bytes,
     ULONG expected, ULONG minimum, ULONG *received, BOOL fenced);
 UQUAD avgl_dma_address(struct avgl_transport *s, APTR pointer);
